@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-14
+
 ### Added
 
 - **`/r` and `/w` report a knxd outage to the client.**  A dead knxd used to be
