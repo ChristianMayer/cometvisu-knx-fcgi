@@ -205,6 +205,26 @@ actual file content (e.g., `#pragma once` or `#include`).
    `wait_for_activity()` therefore distinguishes `Timeout` (no data, connection
    fine) from `Error` (POLLHUP/POLLERR/POLLNVAL or not connected).
 
+9. **knxd availability is reported to the client**: the cache reader publishes
+   its connection state into the shared memory region
+   (`SharedGroupCache::publish_knxd_status()`, read back with `knxd_status()`):
+   `available`, `last_ok` (Unix time of the last successful connection) and
+   `down_since` (Unix time the current outage started, 0 while connected).
+   Every retry keeps the first `down_since` of the current outage.  The state
+   starts as "available" — until the reader reports otherwise no read may be
+   rejected.
+   Whenever the connection is down, `/r` and `/w` append
+   `"knxd":{"ok":false,"since":<ts>,"lastOk":<ts>}` via
+   `add_knxd_outage()` (`src/handlers/knxd_status_json.{h,cpp}`); the field is
+   absent while knxd is reachable, so the normal case costs no bytes.  `/r`
+   answers **`503`** (a read is not successful while the bus is unreachable) and
+   skips the long-poll wait — nothing can arrive, so waiting would only delay
+   the message; the body still carries the last known values.  `/w` answers
+   `503 {"error":"write failed",...}` and passes `force_unavailable = true`,
+   because a failed send proves the outage even if the shared state has not
+   caught up yet.  Without this the client cannot distinguish "bus is quiet"
+   from "connection lost" and shows frozen values forever.
+
 ## Knxd Protocol Details
 
 The eibd client protocol over Unix socket:

@@ -30,14 +30,18 @@
 
 #include "knxd/knxd_client.h"
 #include "knxd/knxd_protocol.h"
+#include "knxd_status_json.h"
 #include "state/session_store.h"
+#include "state/shared_group_cache.h"
 #include "util/hex.h"
+#include "util/json_builder.h"
 #include "util/query_string.h"
 
 namespace cvknxd {
 
-WriteHandler::WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions)
-    : knxd_(knxd), sessions_(sessions) {}
+WriteHandler::WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions,
+                           const SharedGroupCache* cache)
+    : knxd_(knxd), sessions_(sessions), cache_(cache) {}
 
 WriteResult WriteHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
@@ -116,9 +120,21 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   // If all valid writes failed, report an error so the client knows the write
   // didn't reach the bus. Previously the return value of send_group_packet was
   // silently ignored, so clients got HTTP 200 even when the write never went out.
+  //
+  // The response also carries the knxd availability block (down since / last
+  // successful connection) so the client can show why the write failed.
   if (any_valid && any_failed) {
+    const SharedGroupCache::KnxdStatus status =
+        cache_ != nullptr ? cache_->knxd_status() : SharedGroupCache::KnxdStatus{};
+
+    JsonBuilder json;
+    json.start_object();
+    json.add_string("error", "write failed");
+    add_knxd_outage(json, status, /*force_unavailable=*/true);
+    json.end_object();
+
     result.http_status = 503;
-    result.body = R"({"error":"write failed"})";
+    result.body = json.take();
   }
 
   return result;

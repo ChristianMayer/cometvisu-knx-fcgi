@@ -64,6 +64,9 @@ public:
   /// Add an integer key-value pair: "key":<value> (unquoted, minimal JSON)
   void add_number(std::string_view key, int64_t value);
 
+  /// Add a boolean key-value pair: "key":true / "key":false
+  void add_bool(std::string_view key, bool value);
+
   /// Add a nested object as a value.
   /// Caller is responsible for calling start/end_object before/after.
   void add_key(std::string_view key);

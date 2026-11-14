@@ -1106,3 +1106,69 @@ TEST_F(ReadHandlerTest, IndexMonotonicAcrossWrap) {
   // Wrapped position advances: M-1 → 0 → 1
   EXPECT_EQ(i2, 1) << "i must advance: M-1 → 0 → 1";
 }
+
+// ================================================================
+// knxd availability: a read is not successful while the bus connection is
+// gone, so /r answers 503 and still delivers the last known values plus the
+// outage details (so the client can show them to the user).
+// ================================================================
+
+TEST_F(ReadHandlerTest, ReportsTheKnxdOutageAs503AndStillServesCachedData) {
+  cache_.push(0x0A03, {0x42});
+  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_knxd_status(false, 1500);
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=-1");  // cache only, no poll
+
+  EXPECT_EQ(r.http_status, 503) << "a read must not report success while knxd is gone";
+  EXPECT_NE(r.body.find("\"42\""), std::string::npos) << "last known value must still be sent";
+  EXPECT_NE(r.body.find("\"knxd\":{"), std::string::npos) << r.body;
+  EXPECT_NE(r.body.find("\"ok\":false"), std::string::npos) << r.body;
+  EXPECT_NE(r.body.find("\"since\":1500"), std::string::npos) << r.body;
+  EXPECT_NE(r.body.find("\"lastOk\":1000"), std::string::npos) << r.body;
+}
+
+TEST_F(ReadHandlerTest, OutageIsReportedWithoutWaitingForTheLongPollTimeout) {
+  cache_.publish_knxd_status(false, 1500);
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  const auto start = std::chrono::steady_clock::now();
+  auto r = handler.handle("a=1/2/3&t=5");  // would otherwise poll for 5 s
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+
+  EXPECT_EQ(r.http_status, 503);
+  EXPECT_LT(elapsed_ms, 1000) << "nothing can arrive, so waiting is pointless (" << elapsed_ms
+                              << " ms)";
+}
+
+TEST_F(ReadHandlerTest, ReportsAnOutageThatStartsDuringThePoll) {
+  cache_.publish_knxd_status(true, 1000);
+
+  // knxd dies while the request is waiting on the condition variable.
+  std::thread killer([this] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    cache_.publish_knxd_status(false, 1010);
+  });
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=1");  // 1 s poll
+
+  killer.join();
+
+  EXPECT_EQ(r.http_status, 503) << "the outage must be reflected once the poll ends";
+  EXPECT_NE(r.body.find("\"since\":1010"), std::string::npos) << r.body;
+}
+
+TEST_F(ReadHandlerTest, HasNoKnxdBlockWhileKnxdIsAvailable) {
+  cache_.push(0x0A03, {0x42});
+  cache_.publish_knxd_status(true, 1000);
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=-1");
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_EQ(r.body.find("\"knxd\""), std::string::npos) << r.body;
+}

@@ -26,7 +26,7 @@ Router::Router(KnxdClientInterface& knxd, SharedGroupCache& cache, SessionStore&
                int longpoll_timeout_sec, std::string base_url)
     : login_handler_(sessions, std::move(base_url)),
       read_handler_(cache, knxd, sessions, longpoll_timeout_sec),
-      write_handler_(knxd, sessions) {}
+      write_handler_(knxd, sessions, &cache) {}
 
 FcgiResponse Router::route(const FcgiRequest& request) {
   FcgiResponse response;
@@ -42,8 +42,11 @@ FcgiResponse Router::route(const FcgiRequest& request) {
     response.status_code = result.http_status;
     response.body = std::move(result.body);
   } else if (path == "/w") {
-    const auto result = write_handler_.handle(request.query_string);
+    auto result = write_handler_.handle(request.query_string);
     response.status_code = result.http_status;
+    // The body carries the error details (e.g. why a write failed and since
+    // when knxd has been unavailable) — it must reach the client.
+    response.body = std::move(result.body);
   } else {
     // Unknown endpoint
     response.status_code = 404;

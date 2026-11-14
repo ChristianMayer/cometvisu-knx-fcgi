@@ -308,4 +308,40 @@ void SharedGroupCache::notify_all() {
   }
 }
 
+void SharedGroupCache::publish_knxd_status(bool available) {
+  publish_knxd_status(available, static_cast<uint32_t>(std::time(nullptr)));
+}
+
+void SharedGroupCache::publish_knxd_status(bool available, uint32_t now) {
+  if (data_ == nullptr) {
+    return;
+  }
+
+  if (available) {
+    // Set the timestamp before flipping the flag so a reader that sees
+    // "available" also sees an up-to-date last_ok.
+    data_->knxd_last_ok.store(now);
+    data_->knxd_down_since.store(0);
+    data_->knxd_available.store(1);
+    return;
+  }
+
+  // Keep the timestamp of the first failure of the current outage — retries
+  // every few seconds must not move the reported "down since" forward.
+  uint32_t expected = 0;
+  (void)data_->knxd_down_since.compare_exchange_strong(expected, now);
+  data_->knxd_available.store(0);
+}
+
+SharedGroupCache::KnxdStatus SharedGroupCache::knxd_status() const {
+  KnxdStatus status;
+  if (data_ == nullptr) {
+    return status;
+  }
+  status.available = data_->knxd_available.load() != 0;
+  status.last_ok = data_->knxd_last_ok.load();
+  status.down_since = data_->knxd_down_since.load();
+  return status;
+}
+
 }  // namespace cvknxd

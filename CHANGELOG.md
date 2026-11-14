@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/r` and `/w` report a knxd outage to the client.**  A dead knxd used to be
+  invisible over HTTP: `/r` kept answering `200` with the last known — but
+  frozen — values, and only `/w` failed, so a CometVisu client could not tell
+  "the bus is quiet" from "the connection is gone".  The cache reader now
+  publishes its connection state (available / last successful connection /
+  start of the current outage) in the shared memory region, and both handlers
+  append a block while knxd is unreachable:
+
+  ```json
+  {"d":{...},"i":42,"knxd":{"ok":false,"since":1763000000,"lastOk":1762990000}}
+  {"error":"write failed","knxd":{"ok":false,"since":1763000000,"lastOk":1762990000}}
+  ```
+
+  The field is absent while knxd is reachable (no overhead in the normal case).
+  `since` is the Unix time the current outage started, `lastOk` the Unix time of
+  the last successful connection; both are omitted when unknown (knxd never
+  connected since startup, or the outage start was not recorded yet).
+  A read is not successful while the bus connection is gone, so `/r` answers
+  `503` — and it answers immediately instead of waiting for the long-poll
+  timeout, because nothing can arrive.  The body still carries the last known
+  values, so a client may keep showing them and add a "connection lost"
+  marker.  `/w` answers `503` with `{"error":"write failed",...}`.
+  `JsonBuilder` gained `add_bool()` for the `ok` literal.
+
 ### Fixed
 
+- **The router dropped the `/w` response body.**  `Router::route()` only copied
+  `http_status` for `/w`, so error details never reached the client.
 - **Configurations with more than 250 group addresses lost all values above
   address ~250** ([CometVisu#1521](https://github.com/CometVisu/CometVisu/issues/1521)).
   `QueryString` capped the number of values per key at 250 (and total key/value

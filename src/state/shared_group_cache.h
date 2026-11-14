@@ -76,7 +76,14 @@ struct SharedCacheData {
   alignas(64) pthread_mutex_t mutex;
   alignas(64) pthread_cond_t cond;
   std::atomic<uint32_t> position{0};
-  std::atomic<uint32_t> generation{0};               // incremented on each push
+  std::atomic<uint32_t> generation{0};  // incremented on each push
+  // knxd availability, published by the cache reader process.  Workers read it
+  // to tell /r and /w clients that the bus connection is gone.  Starts as
+  // "available": until the reader reports otherwise we must not reject reads
+  // (the reader publishes its real state right after it starts).
+  std::atomic<uint32_t> knxd_available{1};           // 1 = reader is connected to knxd
+  std::atomic<uint32_t> knxd_last_ok{0};             // Unix time of the last connection (0 = never)
+  std::atomic<uint32_t> knxd_down_since{0};          // Unix time the connection broke (0 = up)
   uint32_t num_entries{0};                           // current count (≤ kSharedCacheCapacity)
   SharedCacheEntry entries[kSharedCacheCapacity]{};  // NOLINT(modernize-avoid-c-arrays)
 };
@@ -154,6 +161,24 @@ public:
 
   /// Get the raw data pointer (for passing to child processes).
   [[nodiscard]] SharedCacheData* data() { return data_; }
+
+  /// knxd availability as published by the cache reader process.
+  struct KnxdStatus {
+    bool available = true;    ///< cache reader holds a knxd connection (false once reported)
+    uint32_t last_ok = 0;     ///< Unix time (s) of the last successful connection, 0 = never
+    uint32_t down_since = 0;  ///< Unix time (s) the connection broke, 0 = connected
+  };
+
+  /// Publish the cache reader's knxd connection state.  Called by the cache
+  /// reader process only.  Every failure keeps the timestamp of the first
+  /// failure of the current outage, so clients can report "down since X".
+  void publish_knxd_status(bool available);
+
+  /// Same, with an explicit timestamp (deterministic tests).
+  void publish_knxd_status(bool available, uint32_t now);
+
+  /// Read the published knxd state (lock-free).
+  [[nodiscard]] KnxdStatus knxd_status() const;
 
   /// Size of the shared memory region in bytes.
   [[nodiscard]] static size_t region_size() { return sizeof(SharedCacheData); }

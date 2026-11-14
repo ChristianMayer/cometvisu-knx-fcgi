@@ -92,6 +92,7 @@ add_library(cvknxd_handlers STATIC
     handlers/login_handler.cpp
     handlers/read_handler.cpp
     handlers/write_handler.cpp
+    handlers/knxd_status_json.cpp
 )
 
 target_include_directories(cvknxd_handlers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
