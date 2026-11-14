@@ -23,6 +23,11 @@
  *
  * Enforces limits on unique keys, values per key, and total pairs to
  * prevent memory exhaustion from maliciously crafted query strings.
+ *
+ * The limits are sized for real CometVisu installations: the client sends
+ * ALL addresses of a visualization in a single request, so configs with
+ * several thousand group addresses must work.  Exceeding a limit is never
+ * silent — see limit_exceeded(); handlers turn that into an HTTP 400.
  */
 
 #pragma once
@@ -68,6 +73,26 @@ struct StringEqual {
  */
 class QueryString {
 public:
+  /// Maximum number of unique parameter keys accepted in a single query string.
+  /// CometVisu uses a handful of keys (`i`, `t`, `s`, `a`, `v`), so this is
+  /// already far beyond any legitimate request.
+  static constexpr size_t kMaxQueryParams = 256;
+
+  /// Maximum number of values per single key.  The `a` parameter carries one
+  /// entry per subscribed group address; 4096 addresses produce a ~50 KB query
+  /// string, i.e. more than any web server's default request line limit
+  /// (Apache `LimitRequestLine` is 8190 by default, 32768 in the CometVisu
+  /// container).
+  ///
+  /// Historical note: this limit used to be 250, which silently truncated the
+  /// address list of large CometVisu configs and left the affected tiles
+  /// without a value forever (CometVisu issue #1521).
+  static constexpr size_t kMaxValuesPerKey = 4096;
+
+  /// Absolute maximum total key=value pairs parsed from a query string.
+  /// Bounds the memory a single request can allocate (worst case ~1 MB).
+  static constexpr size_t kMaxTotalPairs = 8192;
+
   /// Parse a raw query string (e.g. "a=1/2/3&t=5&a=4/5/6").
   explicit QueryString(std::string_view raw);
 
@@ -80,11 +105,19 @@ public:
   /// Check if a key exists.
   [[nodiscard]] bool has(std::string_view key) const;
 
+  /// @brief True if at least one parameter was dropped because a limit was hit.
+  ///
+  /// The parser never truncates silently: callers (the request handlers) must
+  /// check this flag and answer with HTTP 400 so a client with an oversized
+  /// request sees the problem instead of receiving incomplete data.
+  [[nodiscard]] bool limit_exceeded() const { return limit_exceeded_; }
+
   /// Get the number of unique keys.
   [[nodiscard]] size_t size() const { return params_.size(); }
 
 private:
   std::unordered_map<std::string, std::vector<std::string>, StringHash, StringEqual> params_;
+  bool limit_exceeded_ = false;
 };
 
 }  // namespace cvknxd

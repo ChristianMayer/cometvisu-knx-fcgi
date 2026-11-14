@@ -43,6 +43,14 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
   WriteResult result;
 
+  // A truncated address list would write to only some of the requested
+  // addresses — never do that silently, report the limit violation instead.
+  if (params.limit_exceeded()) {
+    result.http_status = 400;
+    result.body = R"({"error":"too many addresses"})";
+    return result;
+  }
+
   // ---- Parameter extraction ----
   const auto addresses = params.get_all("a");
   const auto value_opt = params.get("v");

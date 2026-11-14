@@ -22,16 +22,6 @@
 
 namespace cvknxd {
 
-/// Maximum number of unique parameter keys accepted in a single query string.
-/// Prevents memory exhaustion from maliciously crafted requests.
-inline constexpr size_t kMaxQueryParams = 100;
-
-/// Maximum number of values per single key.
-inline constexpr size_t kMaxValuesPerKey = 250;
-
-/// Absolute maximum total key=value pairs parsed from a query string.
-inline constexpr size_t kMaxTotalPairs = 256;
-
 namespace {
 
 // Simple URL percent-decoder
@@ -81,6 +71,7 @@ QueryString::QueryString(std::string_view raw) {
   while (pos < raw.size()) {
     // Enforce total pair limit
     if (total_pairs >= kMaxTotalPairs) {
+      limit_exceeded_ = true;
       break;
     }
     ++total_pairs;
@@ -104,6 +95,7 @@ QueryString::QueryString(std::string_view raw) {
     if (it != params_.end()) {
       // Existing key — enforce max values per key
       if (it->second.size() >= kMaxValuesPerKey) {
+        limit_exceeded_ = true;
         pos = (amp == std::string_view::npos) ? raw.size() : amp + 1;
         continue;  // skip this value, key is full
       }
@@ -111,6 +103,7 @@ QueryString::QueryString(std::string_view raw) {
     } else {
       // New key — enforce max unique keys
       if (params_.size() >= kMaxQueryParams) {
+        limit_exceeded_ = true;
         pos = (amp == std::string_view::npos) ? raw.size() : amp + 1;
         continue;  // skip this key, map is full
       }
