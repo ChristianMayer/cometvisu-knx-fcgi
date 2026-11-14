@@ -39,6 +39,7 @@ namespace cvknxd {
 
 class KnxdClientInterface;
 class SessionStore;
+class SharedGroupCache;
 
 /**
  * @brief Result of a write operation (POST /w).
@@ -46,7 +47,7 @@ class SessionStore;
 struct WriteResult {
   /// HTTP status code (200, 400, 401, 403, 404).
   int http_status = 200;
-  /// Response body (always empty for write).
+  /// Response body: empty on success, JSON error details on failure.
   std::string body;
 };
 
@@ -59,7 +60,12 @@ struct WriteResult {
  */
 class WriteHandler {
 public:
-  WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions);
+  /// @param knxd   knxd client used to send the group telegram.
+  /// @param sessions Session store for `s=` validation.
+  /// @param cache  Optional shared cache; when given, a failed write also
+  ///               reports since when knxd has been unavailable.
+  WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions,
+               const SharedGroupCache* cache = nullptr);
 
   ~WriteHandler() = default;
 
@@ -77,6 +83,7 @@ public:
 private:
   KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
   SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  const SharedGroupCache* cache_ = nullptr;
 };
 
 }  // namespace cvknxd

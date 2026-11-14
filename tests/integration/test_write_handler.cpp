@@ -18,6 +18,7 @@
 #include "handlers/write_handler.h"
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
+#include "state/shared_group_cache.h"
 #include "util/query_string.h"
 
 using namespace cvknxd;
@@ -25,6 +26,7 @@ using namespace cvknxd;
 class WriteHandlerTest : public ::testing::Test {
 protected:
   void SetUp() override {
+    ASSERT_TRUE(cache_.create());
     (void)knxd_.connect("/run/knx");
     (void)knxd_.open_group_socket(false);
   }
@@ -33,6 +35,8 @@ protected:
   MockKnxdClient knxd_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   SessionStore sessions_;
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
+  SharedGroupCache cache_;
 };
 
 TEST_F(WriteHandlerTest, WriteSingleAddress) {
@@ -254,4 +258,45 @@ TEST_F(WriteHandlerTest, SendFailureClearedOnSubsequentCalls) {
   auto result2 = handler.handle("a=KNX:1/2/3&v=8042");
   EXPECT_EQ(result2.http_status, 200);
   EXPECT_FALSE(knxd_.sent_packets().empty());
+}
+
+// ================================================================
+// knxd availability: a failed write must tell the client *why* (and since
+// when), so it can show "KNX connection lost" instead of a generic error.
+// ================================================================
+
+TEST_F(WriteHandlerTest, FailedWriteReportsTheKnxdOutage) {
+  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_knxd_status(false, 1500);
+  knxd_.set_send_fail_count(1);
+
+  WriteHandler handler(knxd_, sessions_, &cache_);
+  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+
+  EXPECT_EQ(result.http_status, 503);
+  EXPECT_NE(result.body.find("\"error\":\"write failed\""), std::string::npos) << result.body;
+  EXPECT_NE(result.body.find("\"knxd\":{"), std::string::npos) << result.body;
+  EXPECT_NE(result.body.find("\"ok\":false"), std::string::npos) << result.body;
+  EXPECT_NE(result.body.find("\"since\":1500"), std::string::npos) << result.body;
+  EXPECT_NE(result.body.find("\"lastOk\":1000"), std::string::npos) << result.body;
+}
+
+TEST_F(WriteHandlerTest, FailedWriteWithoutCacheStillReportsUnavailability) {
+  knxd_.set_send_fail_count(1);
+
+  WriteHandler handler(knxd_, sessions_);  // no cache attached
+  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+
+  EXPECT_EQ(result.http_status, 503);
+  EXPECT_NE(result.body.find("\"knxd\":{\"ok\":false}"), std::string::npos) << result.body;
+}
+
+TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
+  cache_.publish_knxd_status(true, 1000);
+
+  WriteHandler handler(knxd_, sessions_, &cache_);
+  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+
+  EXPECT_EQ(result.http_status, 200);
+  EXPECT_EQ(result.body.find("\"knxd\""), std::string::npos) << result.body;
 }

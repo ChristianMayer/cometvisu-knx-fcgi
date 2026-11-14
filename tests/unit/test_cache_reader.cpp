@@ -139,5 +139,63 @@ TEST(CacheReaderTest, IgnoresGroupValueReadTelegrams) {
   EXPECT_EQ(cache.position(), 0U);
 }
 
+// ================================================================
+// The reader publishes the knxd connection state for /r and /w.
+// ================================================================
+
+TEST(CacheReaderTest, PublishesAvailabilityWhileConnected) {
+  MockKnxdClient knxd;
+  knxd.set_connection_success(true);
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+
+  run_cache_reader(knxd, cache, FastOptions(), [&knxd] { return knxd.wait_calls() >= 3; });
+
+  const auto status = cache.knxd_status();
+  EXPECT_TRUE(status.available);
+  EXPECT_GT(status.last_ok, 0U) << "last successful connection must be stamped";
+  EXPECT_EQ(status.down_since, 0U);
+}
+
+TEST(CacheReaderTest, PublishesOutageWhenKnxdIsMissing) {
+  MockKnxdClient knxd;
+  knxd.set_connection_success(false);  // no /run/knx
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+
+  run_cache_reader(knxd, cache, FastOptions(), [&knxd] { return knxd.connect_calls() >= 2; });
+
+  const auto status = cache.knxd_status();
+  EXPECT_FALSE(status.available);
+  EXPECT_GT(status.down_since, 0U) << "the outage start must be stamped";
+}
+
+TEST(CacheReaderTest, PublishesOutageWhileDisconnected) {
+  MockKnxdClient knxd;
+  knxd.set_connection_success(true);
+  knxd.set_wait_error_count(1);  // connection dies on the first wait
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+
+  // Stop as soon as the reader has connected once and then reported the
+  // outage (before it reconnects) — the initial "unavailable" publish must
+  // not end the loop early.
+  bool saw_connected = false;
+  run_cache_reader(knxd, cache, FastOptions(), [&cache, &saw_connected] {
+    const auto status = cache.knxd_status();
+    if (status.available) {
+      saw_connected = true;
+      return false;
+    }
+    return saw_connected && status.down_since > 0;
+  });
+
+  const auto status = cache.knxd_status();
+  EXPECT_TRUE(saw_connected);
+  EXPECT_FALSE(status.available);
+  EXPECT_GT(status.down_since, 0U);
+  EXPECT_GT(status.last_ok, 0U) << "the last working connection must stay reported";
+}
+
 }  // namespace
 }  // namespace cvknxd

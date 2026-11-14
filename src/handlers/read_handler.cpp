@@ -38,6 +38,7 @@
 
 #include "knxd/knxd_client.h"
 #include "knxd/knxd_protocol.h"
+#include "knxd_status_json.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/hex.h"
@@ -197,6 +198,14 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     }
   }
 
+  // ---- Nothing can arrive while knxd is unreachable ----
+  // Waiting for the full long-poll timeout and only then reporting the outage
+  // would keep the client from ever showing it.  Report right away instead;
+  // the response still carries the last known values and the outage block.
+  if (timeout_sec > 0 && !cache_.knxd_status().available) {
+    timeout_sec = 0;
+  }
+
   // ---- Poll loop — wait on shared condition variable, query delta ----
   auto tstart = std::chrono::steady_clock::now();
   bool written = !already_written.empty();
@@ -248,7 +257,20 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   json.end_object();  // d
   json.add_number("i", lastpos);
+
+  // The cache keeps serving the last known values while knxd is unreachable,
+  // so without this block the client could not tell "bus is quiet" from
+  // "connection lost" — it would show frozen values indefinitely.
+  // A read is also not successful while the bus connection is gone, so it
+  // answers 503; the body still carries the last known values.
+  const auto knxd_status = cache_.knxd_status();
+  add_knxd_outage(json, knxd_status);
+
   json.end_object();  // root
+
+  if (!knxd_status.available) {
+    result.http_status = 503;
+  }
 
   result.body = json.take();
   return result;

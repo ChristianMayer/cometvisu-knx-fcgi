@@ -65,7 +65,6 @@ TEST_F(FullFlowTest, AuthenticatedLogin) {
 TEST_F(FullFlowTest, WriteThenRead) {
   WriteHandler write_handler(knxd_, sessions_);
   ReadHandler read_handler(cache_, knxd_, sessions_);
-
   // Step 1: Write a value
   auto write_result = write_handler.handle("a=KNX:1/2/3&v=800c6f");
   EXPECT_EQ(write_result.http_status, 200);
@@ -172,4 +171,24 @@ TEST_F(FullFlowTest, KnxdCacheIsUsedForReads) {
   ReadHandler handler(cache_, knxd_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&t=30");
   EXPECT_NE(result.body.find("0c6f"), std::string::npos);
+}
+
+// ---- Router ----
+
+TEST_F(FullFlowTest, RouterForwardsTheWriteErrorBody) {
+  Router router(knxd_, cache_, sessions_, 1, "");
+  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_knxd_status(false, 1500);
+  knxd_.set_send_fail_count(1);
+
+  FcgiRequest request;
+  request.request_uri = "/w";
+  request.query_string = "a=KNX:1/2/3&v=8042";
+
+  const auto response = router.route(request);
+
+  EXPECT_EQ(response.status_code, 503);
+  EXPECT_NE(response.body.find("\"error\":\"write failed\""), std::string::npos)
+      << "the router must forward the write error body: " << response.body;
+  EXPECT_NE(response.body.find("\"knxd\":{\"ok\":false"), std::string::npos) << response.body;
 }

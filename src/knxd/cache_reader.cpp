@@ -113,6 +113,10 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
     }
   };
 
+  // Start out unavailable: until the first handshake succeeds there is no
+  // knxd connection, and /r clients should see that right away.
+  cache.publish_knxd_status(false);
+
   while (!stop_requested()) {
     // ---------------- (Re)connect ----------------
     if (!connected) {
@@ -120,6 +124,7 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
         knxd.set_nonblocking(true);
         connected = true;
         backoff_ms = initial_backoff_ms;
+        cache.publish_knxd_status(true);
 
         if (logged_failure) {
           std::cout << "[INFO] knxd connection restored at " << options.socket_path << "\n";
@@ -131,6 +136,7 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
 
       // Make sure a half-open connection does not survive the failed attempt.
       knxd.disconnect();
+      cache.publish_knxd_status(false);  // keeps the first outage timestamp
 
       log_retry("Cannot connect to knxd at " + options.socket_path);
       sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
@@ -160,6 +166,7 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
 
         knxd.disconnect();
         connected = false;
+        cache.publish_knxd_status(false);
         sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
         backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
         break;

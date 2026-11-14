@@ -112,3 +112,24 @@ TEST(JsonBuilderTest, AddNumberWithString) {
   jb.end_object();
   EXPECT_EQ(jb.str(), R"({"v":"0.0.2","i":7})");
 }
+
+TEST(JsonBuilderTest, AddBoolWritesJsonLiterals) {
+  JsonBuilder jb;
+  jb.start_object();
+  jb.add_bool("ok", false);
+  jb.add_bool("up", true);
+  jb.end_object();
+  EXPECT_EQ(jb.str(), R"({"ok":false,"up":true})");
+}
+
+TEST(JsonBuilderTest, AddBoolInsideNestedObject) {
+  JsonBuilder jb;
+  jb.start_object();
+  jb.add_number("i", 3);
+  jb.add_key("knxd");
+  jb.start_object();
+  jb.add_bool("ok", false);
+  jb.end_object();
+  jb.end_object();
+  EXPECT_EQ(jb.str(), R"({"i":3,"knxd":{"ok":false}})");
+}
