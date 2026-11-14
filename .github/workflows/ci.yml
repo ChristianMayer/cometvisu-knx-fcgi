@@ -27,6 +27,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Backstop so a wedged test can never occupy a runner for the default
+    # 6 hours.  Individual tests additionally run under `ctest --timeout`.
+    timeout-minutes: 30
 
     strategy:
       matrix:
@@ -64,7 +67,10 @@ jobs:
         run: cmake --build ${{ env.BUILD_DIR }} -j$(nproc)
 
       - name: Run tests
-        run: ctest --test-dir ${{ env.BUILD_DIR }} --output-on-failure
+        # --timeout bounds every single test: a hanging test (e.g. a leaked
+        # worker holding ctest's output pipe) must fail the job within
+        # seconds instead of blocking the workflow.
+        run: ctest --test-dir ${{ env.BUILD_DIR }} --output-on-failure --timeout 120
 
       - name: Configure (Release)
         run: |
@@ -80,4 +86,4 @@ jobs:
         run: cmake --build ${{ env.BUILD_DIR }}_release -j$(nproc)
 
       - name: Run tests (Release)
-        run: ctest --test-dir ${{ env.BUILD_DIR }}_release --output-on-failure
+        run: ctest --test-dir ${{ env.BUILD_DIR }}_release --output-on-failure --timeout 120

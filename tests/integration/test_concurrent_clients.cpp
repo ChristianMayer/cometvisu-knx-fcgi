@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -345,42 +346,46 @@ struct SharedState {
   std::atomic<int> response_count{0};
 };
 
+/// Kill and reap all workers.
+/// SIGKILL instead of SIGTERM: workers blocked in FCGX_Accept_r() keep
+/// retrying on EINTR, so SIGTERM may be ignored and a blocking wait() would
+/// then hang.  A leaked worker is fatal for the test run because it keeps
+/// ctest's output pipe open, so ctest hangs at "Start N: test_..." forever.
+void kill_workers(const std::vector<pid_t>& children) {
+  for (pid_t child : children) {
+    ::kill(child, SIGKILL);
+  }
+  for (pid_t child : children) {
+    int status{};
+    (void)::waitpid(child, &status, 0);
+  }
+}
+
 /// Fork N children, each running server.run() on the shared listen socket.
 /// Returns child PIDs on success, empty vector on failure.
 std::vector<pid_t> fork_workers(int num_workers, FcgiServer& server) {
   std::vector<pid_t> children;
   children.reserve(static_cast<size_t>(num_workers));
+  const pid_t parent_pid = ::getpid();
   for (int i = 0; i < num_workers; ++i) {
     pid_t pid = ::fork();
     if (pid < 0) {
-      for (pid_t child : children) {
-        ::kill(child, SIGTERM);
-      }
-      int status{};
-      for (size_t j = 0; j < children.size(); ++j) {
-        ::wait(&status);
-      }
+      kill_workers(children);
       children.clear();
       break;
     }
     if (pid == 0) {
+      // The worker must not outlive the test process (see kill_workers()).
+      (void)::prctl(PR_SET_PDEATHSIG, SIGKILL);
+      if (::getppid() != parent_pid) {
+        std::_Exit(1);
+      }
       int r = server.run();
       std::_Exit(r);
     }
     children.push_back(pid);
   }
   return children;
-}
-
-/// Kill all workers and wait for them to exit.
-void kill_workers(const std::vector<pid_t>& children) {
-  for (pid_t child : children) {
-    ::kill(child, SIGTERM);
-  }
-  int status{};
-  for (size_t i = 0; i < children.size(); ++i) {
-    ::wait(&status);
-  }
 }
 
 // ============================================================

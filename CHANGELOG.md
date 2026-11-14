@@ -27,6 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `400 {"error":"too many addresses"}` instead of returning (or writing) an
   incomplete address list.
 
+### Tests
+
+- **A CI job can no longer hang on a leaked test worker.**  The fork-based
+  tests (`test_fork_workers`, `test_concurrent_clients`) left forked workers
+  behind on early assertion failures and terminated them with `SIGTERM`,
+  which a worker blocked in `FCGX_Accept_r()` may ignore.  A surviving worker
+  keeps the pipe open that ctest uses to capture test output, so ctest waits
+  forever for an EOF that never comes and the job sits at
+  `Start 23: test_fork_workers` for hours.  Workers now die with their parent
+  (`PR_SET_PDEATHSIG`), are killed with `SIGKILL` and reaped per pid, and are
+  tracked so `TearDown()` reaps them even after a failed `ASSERT`.
+- `test_fork_workers`'s fork-failure test no longer lowers `RLIMIT_NPROC`
+  (which counts the tasks of the whole real UID and therefore behaves
+  completely differently on a CI runner than on a developer machine); the
+  fork primitive is injected instead, making the failure point deterministic.
+  A new test `WorkersDieWithTheirParent` covers the orphan scenario.
+- CI runs `ctest --timeout 120` and the job has a `timeout-minutes`
+  backstop, so a wedged test fails within seconds instead of blocking the
+  workflow.
+
 ## [1.1.0] — 2026-11-01
 
 ### Fixed
