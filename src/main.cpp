@@ -62,6 +62,7 @@
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/debug_log.h"
+#include "util/fork_safety.h"
 #include "version.h"
 
 namespace {
@@ -390,7 +391,11 @@ int main(int argc, char* argv[]) {
     // A dedicated cache reader drains the single knxd group socket and pushes
     // telegrams into the shared cache.  Workers only open write-only knxd
     // connections — all group telegram reception goes through the reader.
+    //
+    // Both factories flush the parent's log output before forking: a child
+    // inherits the stdio buffers and would otherwise repeat pending lines.
     const std::function<pid_t()> spawn_cache_reader = [&]() -> pid_t {
+      flush_before_fork();
       const pid_t pid = ::fork();
       if (pid < 0) {
         return -1;
@@ -431,6 +436,7 @@ int main(int argc, char* argv[]) {
     };
 
     const std::function<pid_t(int)> spawn_worker = [&](int index) -> pid_t {
+      flush_before_fork();
       const pid_t pid = ::fork();
       if (pid < 0) {
         return -1;
@@ -449,14 +455,23 @@ int main(int argc, char* argv[]) {
         // not delay its readiness: try once, warn on failure, and let
         // send_group_packet() reconnect on demand (connect() remembers the
         // socket path even when the attempt failed).
+        //
+        // Emitted as one line each: starting workers log concurrently to the
+        // same stderr and must not interleave fragments.
         if (!knxd_writer.connect(knxd_socket)) {
-          std::cerr << "[WARN] Worker pid=" << ::getpid() << " (worker " << index
-                    << "): knxd not reachable at " << knxd_socket
-                    << " — continuing, will retry on demand\n";
+          std::cerr << "[WARN] Worker pid=" + std::to_string(::getpid()) + " (worker " +
+                           std::to_string(index) + "): knxd not reachable at " + knxd_socket +
+                           " — continuing, will retry on demand\n";
         } else if (!knxd_writer.open_group_socket(true)) {
-          std::cerr << "[WARN] Worker pid=" << ::getpid() << " (worker " << index
-                    << "): cannot open group socket on knxd at " << knxd_socket
-                    << " — continuing, will retry on demand\n";
+          // Not fatal: the group socket is opened again on the next write.  It
+          // does indicate a configuration problem — knxd provides one
+          // connection per client address, while the pool needs
+          // FCGI_WORKERS + 1 (workers plus the cache reader).
+          std::cerr << "[WARN] Worker pid=" + std::to_string(::getpid()) + " (worker " +
+                           std::to_string(index) + "): cannot open group socket on knxd at " +
+                           knxd_socket +
+                           " — continuing, will retry on demand (FCGI_WORKERS + 1 knxd client "
+                           "slots required: one per worker plus one for the cache reader)\n";
           knxd_writer.disconnect();
         }
 

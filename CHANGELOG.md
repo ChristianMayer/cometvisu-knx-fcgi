@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Startup log lines were repeated once per worker process.**  When stdout is
+  not a terminal — the normal case in a container — the parent's log output is
+  buffered.  Each worker forked with those lines still pending, inherited a copy
+  of the buffer and printed it again, so `docker logs` showed the startup banner
+  up to `FCGI_WORKERS` times.  All forks now flush the buffered output first
+  (`src/util/fork_safety.{h,cpp}`, covered by `test_fork_safety`).
+- **Log lines of concurrently starting processes could interleave.**  The worker
+  and cache-reader warnings are now emitted as one line each, so ten starting
+  workers can no longer produce output like `[WARN] [WARN] Worker pid=Cannot
+  connect …`.
+- **The `cannot open group socket` warning names the cause.**  knxd provides one
+  connection per client address, while the pool needs one per worker plus one
+  for the cache reader — `FCGI_WORKERS + 1` in total.
+
 ## [1.2.0] — 2026-11-14
 
 ### Added

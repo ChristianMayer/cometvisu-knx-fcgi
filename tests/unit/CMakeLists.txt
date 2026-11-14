@@ -68,6 +68,12 @@ add_executable(test_version
 target_link_libraries(test_version PRIVATE cvknxd_version GTest::gtest GTest::gtest_main)
 add_test(NAME test_version COMMAND test_version)
 
+add_executable(test_fork_safety
+    test_fork_safety.cpp
+)
+target_link_libraries(test_fork_safety PRIVATE cvknxd_util GTest::gtest GTest::gtest_main)
+add_test(NAME test_fork_safety COMMAND test_fork_safety)
+
 add_executable(test_fcgi_server
     test_fcgi_server.cpp
 )
