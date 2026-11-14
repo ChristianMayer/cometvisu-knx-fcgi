@@ -9,7 +9,7 @@
         "${workspaceFolder}/build/_deps/googletest-src/googlemock/include"
       ],
       "defines": [
-        "APP_VERSION=\"1.2.0-LocalTest\""
+        "APP_VERSION=\"1.2.1-LocalTest\""
       ],
       "cStandard": "c17",
       "cppStandard": "c++20",

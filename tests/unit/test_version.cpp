@@ -20,7 +20,7 @@
 using namespace cvknxd;
 
 TEST(VersionTest, ReturnsExpectedVersion) {
-  EXPECT_EQ(version(), "1.2.0");
+  EXPECT_EQ(version(), "1.2.1");
 }
 
 TEST(VersionTest, ApplicationName) {

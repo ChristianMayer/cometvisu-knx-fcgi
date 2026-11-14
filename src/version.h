@@ -29,7 +29,7 @@
 
 namespace cvknxd {
 
-/// Returns the application version string (e.g., "1.2.0").
+/// Returns the application version string (e.g., "1.2.1").
 std::string_view version();
 
 /// Returns the application name ("cometvisu-knxd-fcgi").
