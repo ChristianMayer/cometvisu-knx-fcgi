@@ -19,6 +19,7 @@ add_library(cvknxd_util STATIC
     util/json_builder.cpp
     util/hex.cpp
     util/debug_log.cpp
+    util/fork_safety.cpp
 )
 
 target_include_directories(cvknxd_util PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

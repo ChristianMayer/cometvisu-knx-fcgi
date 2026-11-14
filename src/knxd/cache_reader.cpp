@@ -107,7 +107,8 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count() >=
             kRetryLogIntervalMs;
     if (due) {
-      std::cerr << "[WARN] " << reason << " — retrying in the background\n";
+      // Emitted as a single line: the reader shares stderr with all workers.
+      std::cerr << "[WARN] " + reason + " — retrying in the background\n";
       last_log = now;
       logged_failure = true;
     }
@@ -159,8 +160,8 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
       case KnxdClientInterface::WaitResult::Error:
         // Connection lost (knxd restarted / "Link down, terminating").
         // Never fall through to a busy loop: back off, then reconnect.
-        std::cerr << "[WARN] Lost connection to knxd at " << options.socket_path
-                  << " — reconnecting\n";
+        std::cerr << "[WARN] Lost connection to knxd at " + options.socket_path +
+                         " — reconnecting\n";
         logged_failure = true;
         last_log = std::chrono::steady_clock::now();
 

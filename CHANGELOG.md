@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-11-15
+
+### Fixed
+
+- **Startup log lines were repeated once per worker process.**  When stdout is
+  not a terminal — the normal case in a container — the parent's log output is
+  buffered.  Each worker forked with those lines still pending, inherited a copy
+  of the buffer and printed it again, so `docker logs` showed the startup banner
+  up to `FCGI_WORKERS` times.  All forks now flush the buffered output first
+  (`src/util/fork_safety.{h,cpp}`, covered by `test_fork_safety`).
+- **Log lines of concurrently starting processes could interleave.**  The worker
+  and cache-reader warnings are now emitted as one line each, so ten starting
+  workers can no longer produce output like `[WARN] [WARN] Worker pid=Cannot
+  connect …`.
+
 ## [1.2.0] — 2026-11-14
 
 ### Added
