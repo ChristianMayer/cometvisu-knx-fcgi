@@ -18,6 +18,7 @@
 #include "handlers/write_handler.h"
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
+#include "util/query_string.h"
 
 using namespace cvknxd;
 
@@ -83,6 +84,23 @@ TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
   ASSERT_EQ(sent.size(), 2);
   EXPECT_EQ(sent[0].group_addr, 0x0A03);  // 1/2/3
   EXPECT_EQ(sent[1].group_addr, 0x2506);  // 4/5/6
+}
+
+// A truncated address list would silently write to only some of the requested
+// addresses — that must never happen, so report the limit violation instead.
+TEST_F(WriteHandlerTest, TooManyAddressesReturns400) {
+  std::string q;
+  for (size_t i = 0; i < QueryString::kMaxValuesPerKey + 10; ++i) {
+    q += (i == 0 ? "a=KNX:1/2/3" : "&a=KNX:1/2/3");
+  }
+  q += "&v=8042";
+
+  WriteHandler handler(knxd_, sessions_);
+  auto result = handler.handle(q);
+
+  EXPECT_EQ(result.http_status, 400);
+  EXPECT_NE(result.body.find("\"error\":\"too many addresses\""), std::string::npos);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, MissingAddress) {

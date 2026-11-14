@@ -91,29 +91,68 @@ TEST(QueryStringTest, ValueWithEquals) {
   EXPECT_EQ(*val, "foo=bar");
 }
 
-TEST(QueryStringTest, ParameterCountLimit) {
-  // Build a query string with many unique parameters
+TEST(QueryStringTest, SmallRequestDoesNotReportLimitExceeded) {
+  QueryString qs("s=abc123&a=1/2/3&a=4/5/6&t=0&i=42");
+  EXPECT_FALSE(qs.limit_exceeded());
+  EXPECT_EQ(qs.get_all("a").size(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Regression test for https://github.com/CometVisu/CometVisu/issues/1521
+//
+// CometVisu subscribes every address of the config in ONE request.  The old
+// limits (250 values per key / 256 total pairs) silently dropped everything
+// beyond the 250th address, so those tiles stayed empty forever — neither the
+// initial read nor any long poll ever saw them.
+// ---------------------------------------------------------------------------
+TEST(QueryStringTest, HundredsOfAddressesAreNotTruncated) {
+  std::string q = "i=981&t=0&s=0123456789abcdef";
+  constexpr size_t kAddresses = 600;
+  for (size_t i = 0; i < kAddresses; ++i) {
+    q += "&a=KNX:11/2/" + std::to_string(i);
+  }
+
+  QueryString qs(q);
+
+  EXPECT_FALSE(qs.limit_exceeded());
+  EXPECT_EQ(*qs.get("i"), "981");
+  EXPECT_EQ(*qs.get("t"), "0");
+  EXPECT_EQ(*qs.get("s"), "0123456789abcdef");
+
+  const auto all = qs.get_all("a");
+  ASSERT_EQ(all.size(), kAddresses);
+  EXPECT_EQ(all.front(), "KNX:11/2/0");
+
+  const std::string last_expected = "KNX:11/2/" + std::to_string(kAddresses - 1);
+  EXPECT_EQ(all.back(), last_expected);
+}
+
+TEST(QueryStringTest, UniqueKeyLimitIsEnforcedAndReported) {
+  const size_t limit = QueryString::kMaxQueryParams;
   std::string q;
-  for (int i = 0; i < 150; ++i) {
+  for (size_t i = 0; i < limit + 10; ++i) {
     if (i > 0) {
       q += '&';
     }
     q += "p" + std::to_string(i) + "=v" + std::to_string(i);
   }
+
   QueryString qs(q);
-  // Should not exceed the limit — stops at kMaxQueryParams (100)
-  EXPECT_LE(qs.size(), 100);
-  // First parameter should still be present
+
+  // Should stop at kMaxQueryParams
+  EXPECT_EQ(qs.size(), limit);
   EXPECT_TRUE(qs.has("p0"));
   EXPECT_EQ(*qs.get("p0"), "v0");
-  // Parameter beyond limit should be ignored
-  EXPECT_FALSE(qs.has("p140"));
+  EXPECT_FALSE(qs.has("p" + std::to_string(limit + 5)));
+
+  // Dropping data must never be silent
+  EXPECT_TRUE(qs.limit_exceeded());
 }
 
-TEST(QueryStringTest, ValueCountPerKeyLimit) {
-  // Build more values than kMaxValuesPerKey (250)
+TEST(QueryStringTest, ValueCountPerKeyLimitIsEnforcedAndReported) {
+  const size_t limit = QueryString::kMaxValuesPerKey;
   std::string q;
-  for (int i = 0; i < 300; ++i) {
+  for (size_t i = 0; i < limit + 10; ++i) {
     if (i > 0) {
       q += '&';
     }
@@ -121,43 +160,40 @@ TEST(QueryStringTest, ValueCountPerKeyLimit) {
   }
 
   QueryString qs(q);
-  auto all = qs.get_all("a");
+  const auto all = qs.get_all("a");
 
-  // Should stop exactly at kMaxValuesPerKey (250)
-  ASSERT_EQ(all.size(), 250);
+  // Should stop exactly at kMaxValuesPerKey
+  ASSERT_EQ(all.size(), limit);
   EXPECT_EQ(all.front(), "v0");
-  EXPECT_EQ(all.back(), "v249");
+  const std::string last_expected = "v" + std::to_string(limit - 1);
+  EXPECT_EQ(all.back(), last_expected);
+
+  EXPECT_TRUE(qs.limit_exceeded());
 }
 
-TEST(QueryStringTest, TotalParamCountLimit) {
-  // Use two keys so the total pair limit (256) is reached before
-  // the per-key limit (250).
+TEST(QueryStringTest, TotalParamCountLimitIsEnforcedAndReported) {
+  // Alternate between two keys so the total pair limit is reached before
+  // the per-key limit.
+  const size_t limit = QueryString::kMaxTotalPairs;
   std::string q;
-  for (int i = 0; i < 300; ++i) {
+  for (size_t i = 0; i < limit + 10; ++i) {
     if (i > 0) {
       q += '&';
     }
-
-    const char* key = (i % 2 == 0) ? "a" : "b";
-    q += std::string(key) + "=v" + std::to_string(i);
+    q += std::string((i % 2 == 0) ? "a" : "b") + "=v" + std::to_string(i);
   }
 
   QueryString qs(q);
 
   EXPECT_EQ(qs.size(), 2);
 
-  auto a = qs.get_all("a");
-  auto b = qs.get_all("b");
+  const auto a = qs.get_all("a");
+  const auto b = qs.get_all("b");
 
-  // Exactly kMaxTotalPairs (256) values should be retained.
-  EXPECT_EQ(a.size() + b.size(), 256);
+  // Exactly kMaxTotalPairs values should be retained.
+  EXPECT_EQ(a.size() + b.size(), limit);
+  ASSERT_EQ(a.size(), limit / 2);
+  ASSERT_EQ(b.size(), limit / 2);
 
-  // With alternating keys, both receive 128 values.
-  ASSERT_EQ(a.size(), 128);
-  ASSERT_EQ(b.size(), 128);
-
-  EXPECT_EQ(a.front(), "v0");
-  EXPECT_EQ(a.back(), "v254");
-  EXPECT_EQ(b.front(), "v1");
-  EXPECT_EQ(b.back(), "v255");
+  EXPECT_TRUE(qs.limit_exceeded());
 }

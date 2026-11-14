@@ -72,6 +72,14 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
   ReadResult result;
 
+  // A truncated parameter list would silently drop addresses: the client would
+  // never receive values for them (CometVisu issue #1521).  Report it instead.
+  if (params.limit_exceeded()) {
+    result.http_status = 400;
+    result.body = R"({"error":"too many addresses"})";
+    return result;
+  }
+
   // ---- Parse parameters ----
   const auto addresses = params.get_all("a");
   if (addresses.empty()) {

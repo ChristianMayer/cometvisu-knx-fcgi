@@ -21,6 +21,7 @@
 #include "mock_knxd_socket.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
+#include "util/query_string.h"
 
 using namespace cvknxd;
 
@@ -78,6 +79,48 @@ TEST_F(ReadHandlerTest, NoValidAddressesReturns404) {
   ReadHandler handler(cache_, knxd_, sessions_);
   auto r = handler.handle("a=invalid");
   EXPECT_EQ(r.http_status, 404);
+}
+
+// Regression test for https://github.com/CometVisu/CometVisu/issues/1521:
+// exceeding the address limit must be reported instead of silently dropping
+// addresses (which left those tiles without any value forever).
+TEST_F(ReadHandlerTest, TooManyAddressesReturns400) {
+  std::string q = "t=0";
+  for (size_t i = 0; i < QueryString::kMaxValuesPerKey + 10; ++i) {
+    q += "&a=1/2/3";
+  }
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle(q);
+
+  EXPECT_EQ(r.http_status, 400);
+  EXPECT_NE(r.body.find("\"error\":\"too many addresses\""), std::string::npos);
+}
+
+// A realistic large configuration (600 addresses) must be served completely:
+// all addresses have to be parsed and the last one has to be delivered.
+TEST_F(ReadHandlerTest, SixHundredAddressesAreAllServed) {
+  constexpr int kAddresses = 600;
+  std::string q = "t=0";
+  std::string last_addr_str;
+  uint16_t last_eibaddr = 0;
+  for (int i = 0; i < kAddresses; ++i) {
+    const int main = 1;
+    const int middle = 2 + i / 256;  // 1/2/*, 1/3/*, 1/4/*
+    const int sub = i % 256;
+    last_addr_str = std::to_string(main) + "/" + std::to_string(middle) + "/" + std::to_string(sub);
+    last_eibaddr = static_cast<uint16_t>((main << 11) | (middle << 8) | sub);
+    q += "&a=" + last_addr_str;
+  }
+  // Value for the LAST address of the list.  With the old 250-address limit
+  // this address was dropped, so the tile would never receive a value.
+  cache_.push(last_eibaddr, {0x2A});
+
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle(q);
+
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find("\"" + last_addr_str + "\":\"2a\""), std::string::npos);
 }
 
 // ================================================================

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Configurations with more than 250 group addresses lost all values above
+  address ~250** ([CometVisu#1521](https://github.com/CometVisu/CometVisu/issues/1521)).
+  `QueryString` capped the number of values per key at 250 (and total key/value
+  pairs at 256) and silently dropped the excess.  Since CometVisu subscribes
+  every address of a visualization in one request, no `GroupValueRead` was sent
+  for the dropped addresses and the long-poll filter never matched them — the
+  corresponding tiles stayed empty forever (independent of the order in the
+  config).  The limits are now `kMaxValuesPerKey = 4096`,
+  `kMaxTotalPairs = 8192` and `kMaxQueryParams = 256`, and they are public
+  constants on `QueryString`.
+
+### Changed
+
+- **Query-string limit violations are no longer silent.**  `QueryString`
+  reports truncation via `limit_exceeded()`; `/r` and `/w` answer with
+  `400 {"error":"too many addresses"}` instead of returning (or writing) an
+  incomplete address list.
+
 ## [1.1.0] — 2026-11-01
 
 ### Fixed
