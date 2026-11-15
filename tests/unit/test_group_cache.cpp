@@ -19,7 +19,7 @@
 
 #include "state/group_cache.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 class GroupCacheTest : public ::testing::Test {
 protected:
@@ -372,7 +372,7 @@ TEST_F(GroupCacheTest, GetDeltaConsistentUnderConcurrentWrites) {
 }
 
 // ================================================================
-// Adapted from original MockKnxdClient cache tests
+// Adapted from original MockBusLink cache tests
 // ================================================================
 
 // Original: CacheReadMiss → get returns nullopt for non-existent address

@@ -17,7 +17,7 @@
 
 #include "util/hex.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 TEST(HexTest, DecodeLowercase) {
   auto bytes = hex_decode("0c6f");

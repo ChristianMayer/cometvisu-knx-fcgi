@@ -36,16 +36,15 @@
  *     writes by the cache reader process.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_READ_HANDLER_H_
-#define COMETVISU_KNXD_FCGI_READ_HANDLER_H_
+#pragma once
 
 #include <optional>
 #include <string>
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
-class KnxdClientInterface;
+class BusLink;
 class SessionStore;
 class SharedGroupCache;
 
@@ -79,8 +78,13 @@ struct ReadResult {
  */
 class ReadHandler {
 public:
-  ReadHandler(SharedGroupCache& cache, KnxdClientInterface& knxd, SessionStore& sessions,
-              int longpoll_timeout_sec = 300);
+  /// @param cache Shared cache for group telegrams.
+  /// @param knxd  Bus link used to send GroupValueRead on t=0.
+  /// @param sessions Session store for `s=` validation.
+  /// @param longpoll_timeout_sec Maximum long-poll duration.
+  /// @param outage_key JSON key of the outage block (`"knxd"` or `"bus"`).
+  ReadHandler(SharedGroupCache& cache, BusLink& knxd, SessionStore& sessions,
+              int longpoll_timeout_sec = 300, std::string outage_key = "knxd");
 
   ~ReadHandler() = default;
 
@@ -96,14 +100,13 @@ public:
   [[nodiscard]] ReadResult handle(std::string_view query_string);
 
 private:
-  SharedGroupCache& cache_;    // NOLINT — shared cache for group telegrams
-  KnxdClientInterface& knxd_;  // NOLINT — for sending GroupValueRead on t=0
-  SessionStore& sessions_;     // NOLINT
+  SharedGroupCache& cache_;  // NOLINT — shared cache for group telegrams
+  BusLink& knxd_;            // NOLINT — for sending GroupValueRead on t=0
+  SessionStore& sessions_;   // NOLINT
   int longpoll_timeout_sec_;
+  std::string outage_key_;
 
   [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);
 };
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_READ_HANDLER_H_
+}  // namespace cvknx

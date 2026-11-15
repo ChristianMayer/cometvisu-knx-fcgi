@@ -37,11 +37,11 @@
 #include "util/json_builder.h"
 #include "util/query_string.h"
 
-namespace cvknxd {
+namespace cvknx {
 
-WriteHandler::WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions,
-                           const SharedGroupCache* cache)
-    : knxd_(knxd), sessions_(sessions), cache_(cache) {}
+WriteHandler::WriteHandler(BusLink& knxd, SessionStore& sessions, const SharedGroupCache* cache,
+                           std::string outage_key)
+    : knxd_(knxd), sessions_(sessions), cache_(cache), outage_key_(std::move(outage_key)) {}
 
 WriteResult WriteHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
@@ -124,13 +124,13 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   // The response also carries the knxd availability block (down since / last
   // successful connection) so the client can show why the write failed.
   if (any_valid && any_failed) {
-    const SharedGroupCache::KnxdStatus status =
-        cache_ != nullptr ? cache_->knxd_status() : SharedGroupCache::KnxdStatus{};
+    const SharedGroupCache::BusStatus status =
+        cache_ != nullptr ? cache_->bus_status() : SharedGroupCache::BusStatus{};
 
     JsonBuilder json;
     json.start_object();
     json.add_string("error", "write failed");
-    add_knxd_outage(json, status, /*force_unavailable=*/true);
+    add_bus_outage(json, status, outage_key_, /*force_unavailable=*/true);
     json.end_object();
 
     result.http_status = 503;
@@ -140,4 +140,4 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   return result;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

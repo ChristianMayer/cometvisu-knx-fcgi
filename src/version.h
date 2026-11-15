@@ -27,7 +27,7 @@
 
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
 /// Returns the application version string (e.g., "1.2.1").
 std::string_view version();
@@ -47,4 +47,4 @@ std::string_view knxd_build_version();
 /// Returns an empty string if the knxd git hash could not be determined.
 std::string_view knxd_build_git_hash();
 
-}  // namespace cvknxd
+}  // namespace cvknx

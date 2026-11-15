@@ -33,7 +33,7 @@
 
 #include "fcgi/fcgi_server.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 namespace {
 
@@ -451,7 +451,7 @@ TEST_F(FcgiServerSocketTest, ListenOnTcpPortZero) {
 //      terminal instead of the socket.
 //
 // The full request/response cycle IS tested by the e2e tests
-// (test_full_flow.cpp) using MockKnxdClient. The socket creation itself
+// (test_full_flow.cpp) using MockBusLink. The socket creation itself
 // is verified by the FcgiServerSocketTest suite above.
 //
 // To manually test the full FCGI protocol over a real socket:

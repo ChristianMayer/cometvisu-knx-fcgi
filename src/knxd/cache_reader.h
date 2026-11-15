@@ -24,19 +24,19 @@
  * would burn a full CPU core, which is unacceptable on an embedded system.
  *
  * Extracted from main.cpp so that the reconnect/backoff behaviour is unit
- * testable with MockKnxdClient.
+ * testable with MockBusLink.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_CACHE_READER_H_
-#define COMETVISU_KNXD_FCGI_CACHE_READER_H_
+#pragma once
 
 #include <functional>
 #include <string>
 
-namespace cvknxd {
+namespace cvknx {
 
-class KnxdClientInterface;
+class BusLink;
 class SharedGroupCache;
+class SharedTxQueue;
 
 /// Tunables for run_cache_reader().  Defaults are production values; tests
 /// use very small values to keep the runtime short.
@@ -53,21 +53,21 @@ struct CacheReaderOptions {
   int sleep_slice_ms = 100;
 };
 
-/// Pump group telegrams from knxd into the shared cache until should_stop()
+/// Pump group telegrams from the bus into the shared cache until should_stop()
 /// returns true.
 ///
 /// Guarantees:
-///   - never busy-loops, even when knxd is missing or the connection dies;
+///   - never busy-loops, even when the bus link is missing or dies;
 ///   - retries the connection forever with exponential backoff;
-///   - resumes pushing telegrams as soon as knxd answers again.
+///   - resumes pushing telegrams as soon as the link is usable again.
 ///
-/// @param knxd Client to use (must not be connected yet; the loop owns it).
+/// @param link Bus link to use (must not be connected yet; the loop owns it).
 /// @param cache Shared cache that receives the telegrams.
-/// @param options Timing and socket-path configuration.
+/// @param tx_queue Optional shared TX ring: when given, the loop also drains
+///        outgoing telegrams and is woken by its eventfd (zero added latency).
+/// @param options Timing configuration.
 /// @param should_stop Cooperative stop predicate, evaluated frequently.
-void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
+void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_queue,
                       const CacheReaderOptions& options, const std::function<bool()>& should_stop);
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_CACHE_READER_H_
+}  // namespace cvknx

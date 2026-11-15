@@ -30,7 +30,7 @@
 #include <string>
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
 /**
  * @brief Minimal JSON builder.
@@ -96,4 +96,4 @@ private:
   void add_quoted(std::string_view str);
 };
 
-}  // namespace cvknxd
+}  // namespace cvknx

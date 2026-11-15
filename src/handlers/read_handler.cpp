@@ -45,14 +45,15 @@
 #include "util/json_builder.h"
 #include "util/query_string.h"
 
-namespace cvknxd {
+namespace cvknx {
 
-ReadHandler::ReadHandler(SharedGroupCache& cache, KnxdClientInterface& knxd, SessionStore& sessions,
-                         int longpoll_timeout_sec)
+ReadHandler::ReadHandler(SharedGroupCache& cache, BusLink& knxd, SessionStore& sessions,
+                         int longpoll_timeout_sec, std::string outage_key)
     : cache_(cache),
       knxd_(knxd),
       sessions_(sessions),
-      longpoll_timeout_sec_(longpoll_timeout_sec) {}
+      longpoll_timeout_sec_(longpoll_timeout_sec),
+      outage_key_(std::move(outage_key)) {}
 
 std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
   if (t_str.empty()) {
@@ -202,7 +203,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // Waiting for the full long-poll timeout and only then reporting the outage
   // would keep the client from ever showing it.  Report right away instead;
   // the response still carries the last known values and the outage block.
-  if (timeout_sec > 0 && !cache_.knxd_status().available) {
+  if (timeout_sec > 0 && !cache_.bus_status().available) {
     timeout_sec = 0;
   }
 
@@ -263,12 +264,12 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   // "connection lost" — it would show frozen values indefinitely.
   // A read is also not successful while the bus connection is gone, so it
   // answers 503; the body still carries the last known values.
-  const auto knxd_status = cache_.knxd_status();
-  add_knxd_outage(json, knxd_status);
+  const auto bus_status = cache_.bus_status();
+  add_bus_outage(json, bus_status, outage_key_);
 
   json.end_object();  // root
 
-  if (!knxd_status.available) {
+  if (!bus_status.available) {
     result.http_status = 503;
   }
 
@@ -276,4 +277,4 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   return result;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

@@ -31,7 +31,7 @@
 #include "util/query_string.h"
 #include "version.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 /// CometVisu protocol version reported in the login response "v" field.
 /// This is the wire-protocol version, not the software version.
@@ -110,4 +110,4 @@ std::string LoginHandler::handle(std::string_view query_string) {
   return json.take();
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

@@ -29,15 +29,14 @@
  *     eibwrite-cgi which silently ignored failures.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_
-#define COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_
+#pragma once
 
 #include <string>
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
-class KnxdClientInterface;
+class BusLink;
 class SessionStore;
 class SharedGroupCache;
 
@@ -60,12 +59,13 @@ struct WriteResult {
  */
 class WriteHandler {
 public:
-  /// @param knxd   knxd client used to send the group telegram.
+  /// @param knxd   Bus link used to send the group telegram.
   /// @param sessions Session store for `s=` validation.
   /// @param cache  Optional shared cache; when given, a failed write also
-  ///               reports since when knxd has been unavailable.
-  WriteHandler(KnxdClientInterface& knxd, SessionStore& sessions,
-               const SharedGroupCache* cache = nullptr);
+  ///               reports since when the bus has been unavailable.
+  /// @param outage_key JSON key of the outage block (`"knxd"` or `"bus"`).
+  WriteHandler(BusLink& knxd, SessionStore& sessions, const SharedGroupCache* cache = nullptr,
+               std::string outage_key = "knxd");
 
   ~WriteHandler() = default;
 
@@ -81,11 +81,10 @@ public:
   [[nodiscard]] WriteResult handle(std::string_view query_string);
 
 private:
-  KnxdClientInterface& knxd_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
-  SessionStore& sessions_;     // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  BusLink& knxd_;           // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+  SessionStore& sessions_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
   const SharedGroupCache* cache_ = nullptr;
+  std::string outage_key_;
 };
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_WRITE_HANDLER_H_
+}  // namespace cvknx

@@ -26,7 +26,7 @@
 #include <chrono>
 #include <random>
 
-namespace cvknxd {
+namespace cvknx {
 
 SessionStore::SessionStore(int session_ttl_sec, size_t max_sessions)
     : session_ttl_sec_(session_ttl_sec), max_sessions_(max_sessions) {}
@@ -129,4 +129,4 @@ std::string SessionStore::generate_id() {
   return id;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

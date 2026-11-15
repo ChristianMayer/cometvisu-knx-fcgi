@@ -13,8 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#ifndef COMETVISU_KNXD_FCGI_FCGI_SERVER_H_
-#define COMETVISU_KNXD_FCGI_FCGI_SERVER_H_
+#pragma once
 
 /**
  * @file fcgi_server.h
@@ -38,7 +37,7 @@
 
 #include "fcgi_request.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 /// Callback type for request handlers.
 /// Takes a parsed request and returns the response.
@@ -171,6 +170,4 @@ private:
   void write_response(const FcgiResponse& response);
 };
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_FCGI_SERVER_H_
+}  // namespace cvknx

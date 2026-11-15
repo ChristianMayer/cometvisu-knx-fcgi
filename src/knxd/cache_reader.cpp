@@ -20,6 +20,7 @@
 
 #include "knxd/cache_reader.h"
 
+#include <poll.h>
 #include <time.h>
 
 #include <algorithm>
@@ -28,13 +29,14 @@
 #include <iostream>
 #include <vector>
 
-#include "knxd/knxd_client.h"
+#include "bus/bus_link.h"
 #include "knxd/knxd_protocol.h"
 #include "state/shared_group_cache.h"
+#include "state/shared_tx_queue.h"
 #include "util/debug_log.h"
 #include "util/hex.h"
 
-namespace cvknxd {
+namespace cvknx {
 namespace {
 
 /// Minimum interval between two "knxd unreachable" log lines.  knxd may be
@@ -51,7 +53,7 @@ void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool
       return;
     }
     const int chunk = std::min(remaining, slice);
-    struct timespec request{};
+    struct timespec request {};
     request.tv_sec = chunk / 1000;
     request.tv_nsec = static_cast<long>(chunk % 1000) * 1000000L;
     // EINTR (signal) is expected — the loop re-checks the stop flag.
@@ -62,11 +64,11 @@ void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool
 
 /// Push every pending group telegram into the shared cache.
 /// @return number of telegrams that were pushed.
-int drain_telegrams(KnxdClientInterface& knxd, SharedGroupCache& cache) {
+int drain_telegrams(BusLink& link, SharedGroupCache& cache) {
   int pushed = 0;
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
-  while (knxd.poll_group_telegram(addr, apdu)) {
+  while (link.poll_group_telegram(addr, apdu)) {
     ApduType apdu_type{};
     std::vector<uint8_t> value_data;
     if (!parse_apdu(apdu, apdu_type, value_data) || apdu_type == ApduType::Read) {
@@ -80,9 +82,83 @@ int drain_telegrams(KnxdClientInterface& knxd, SharedGroupCache& cache) {
   return pushed;
 }
 
+/// What woke the loop.
+enum class Activity : std::uint8_t { Timeout, Data, Tx, Error };
+
+/// Send every telegram waiting in the shared TX ring.
+/// Clears the eventfd first, so a push during draining re-arms it.
+/// @return number of telegrams handed to the bus without error.
+int drain_tx_queue(BusLink& link, SharedTxQueue& queue) {
+  queue.drain_notifications();
+  int sent = 0;
+  uint16_t addr = 0;
+  std::vector<uint8_t> apdu;
+  while (queue.peek(addr, apdu)) {
+    if (!link.send_group_packet(addr, apdu)) {
+      // The link is gone.  The telegram stays queued and is sent after the
+      // reconnect — a write must never be lost silently.
+      std::cerr << "[WARN] Failed to send queued telegram to " << link.label() << "\n";
+      break;
+    }
+    queue.pop_drop();
+    ++sent;
+    DebugLog::knxd_send("tx_queue", KnxGroupAddress::from_eibaddr(addr).to_string(),
+                        hex_encode(apdu.data(), apdu.size()));
+  }
+  return sent;
+}
+
+/// Wait for bus traffic, an outgoing telegram, or the timeout — one poll().
+/// Never busy-loops: the eventfd is consumed by drain_tx_queue().
+Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_ms) {
+  if (tx_queue == nullptr || tx_queue->eventfd() < 0) {
+    switch (link.wait_for_activity(timeout_ms)) {
+      case BusLink::WaitResult::GroupData:
+        return Activity::Data;
+      case BusLink::WaitResult::Timeout:
+        return Activity::Timeout;
+      case BusLink::WaitResult::Error:
+        return Activity::Error;
+    }
+    return Activity::Timeout;
+  }
+
+  struct pollfd fds[2]{};
+  nfds_t count = 0;
+  int link_index = -1;
+  const int link_fd = link.get_fd();
+  if (link_fd >= 0) {
+    fds[count].fd = link_fd;
+    fds[count].events = POLLIN;
+    link_index = static_cast<int>(count);
+    ++count;
+  }
+  const int tx_index = static_cast<int>(count);
+  fds[count].fd = tx_queue->eventfd();
+  fds[count].events = POLLIN;
+  ++count;
+
+  const int rc = ::poll(fds, count, timeout_ms);
+  if (rc <= 0) {
+    return Activity::Timeout;  // timeout or EINTR — the caller re-checks stop
+  }
+  if ((fds[tx_index].revents & POLLIN) != 0) {
+    return Activity::Tx;
+  }
+  if (link_index >= 0) {
+    if ((fds[link_index].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+      return Activity::Error;
+    }
+    if ((fds[link_index].revents & POLLIN) != 0) {
+      return Activity::Data;
+    }
+  }
+  return Activity::Timeout;
+}
+
 }  // namespace
 
-void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
+void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_queue,
                       const CacheReaderOptions& options, const std::function<bool()>& should_stop) {
   const int initial_backoff_ms = std::max(1, options.reconnect_backoff_ms);
   const int max_backoff_ms = std::max(initial_backoff_ms, options.max_reconnect_backoff_ms);
@@ -115,20 +191,20 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
   };
 
   // Start out unavailable: until the first handshake succeeds there is no
-  // knxd connection, and /r clients should see that right away.
-  cache.publish_knxd_status(false);
+  // bus connection, and /r clients should see that right away.
+  cache.publish_bus_status(false);
 
   while (!stop_requested()) {
     // ---------------- (Re)connect ----------------
     if (!connected) {
-      if (knxd.connect(options.socket_path) && knxd.open_group_socket(false)) {
-        knxd.set_nonblocking(true);
+      if (link.connect()) {
+        link.set_nonblocking(true);
         connected = true;
         backoff_ms = initial_backoff_ms;
-        cache.publish_knxd_status(true);
+        cache.publish_bus_status(true);
 
         if (logged_failure) {
-          std::cout << "[INFO] knxd connection restored at " << options.socket_path << "\n";
+          std::cout << "[INFO] Bus connection restored to " << link.label() << "\n";
           std::cout << std::flush;  // stdout is block-buffered when redirected
           logged_failure = false;
         }
@@ -136,38 +212,49 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
       }
 
       // Make sure a half-open connection does not survive the failed attempt.
-      knxd.disconnect();
-      cache.publish_knxd_status(false);  // keeps the first outage timestamp
+      link.disconnect();
+      cache.publish_bus_status(false);  // keeps the first outage timestamp
 
-      log_retry("Cannot connect to knxd at " + options.socket_path);
+      log_retry("Cannot connect to " + link.label());
       sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
       backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
       continue;
     }
 
-    // ---------------- Wait for group telegrams ----------------
-    switch (knxd.wait_for_activity(wait_timeout_ms)) {
-      case KnxdClientInterface::WaitResult::GroupData:
-        if (drain_telegrams(knxd, cache) > 0) {
+    // ---------------- Drain pending writes ----------------
+    // Always before waiting: a telegram queued while we were busy must not
+    // wait for the next poll slice.  Re-loop when something was sent so the
+    // stop predicate and the queue are re-evaluated before blocking again.
+    if (tx_queue != nullptr && drain_tx_queue(link, *tx_queue) > 0) {
+      continue;
+    }
+
+    // ---------------- Wait for activity ----------------
+    switch (wait_for_activity(link, tx_queue, wait_timeout_ms)) {
+      case Activity::Tx:
+        continue;  // a worker queued a telegram — send it right away
+
+      case Activity::Data:
+        if (drain_telegrams(link, cache) > 0) {
           backoff_ms = initial_backoff_ms;
         }
         break;
 
-      case KnxdClientInterface::WaitResult::Timeout:
+      case Activity::Timeout:
         // Nothing to do — just check the stop flag again.
         break;
 
-      case KnxdClientInterface::WaitResult::Error:
-        // Connection lost (knxd restarted / "Link down, terminating").
-        // Never fall through to a busy loop: back off, then reconnect.
-        std::cerr << "[WARN] Lost connection to knxd at " + options.socket_path +
-                         " — reconnecting\n";
+      case Activity::Error:
+        // Connection lost (daemon restarted / "Link down, terminating" /
+        // router gone).  Never fall through to a busy loop: back off, then
+        // reconnect.
+        std::cerr << "[WARN] Lost connection to " + link.label() + " — reconnecting\n";
         logged_failure = true;
         last_log = std::chrono::steady_clock::now();
 
-        knxd.disconnect();
+        link.disconnect();
         connected = false;
-        cache.publish_knxd_status(false);
+        cache.publish_bus_status(false);
         sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
         backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
         break;
@@ -175,4 +262,4 @@ void run_cache_reader(KnxdClientInterface& knxd, SharedGroupCache& cache,
   }
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

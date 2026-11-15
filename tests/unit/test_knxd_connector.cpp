@@ -15,96 +15,96 @@
 
 #include <gtest/gtest.h>
 
-#include "../../mocks/mock_knxd_socket.h"
-#include "../../src/knxd/knxd_connector.h"
+#include "../../mocks/mock_bus_link.h"
+#include "../../src/bus/bus_connector.h"
 
-namespace cvknxd {
+namespace cvknx {
 namespace {
 
 // Use 1ms delays in tests to avoid waiting for real retry timers.
 const int kTestDelaysMs[] = {1, 1, 1, 1, 1};
 
 TEST(KnxdConnectorTest, FirstAttemptSucceeds) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", false, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, false, kTestDelaysMs);
 
   EXPECT_TRUE(result);
 }
 
 TEST(KnxdConnectorTest, SecondAttemptSucceedsAfterOneFail) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   mock.set_connect_fail_count(1);  // first call fails, second succeeds
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", false, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, false, kTestDelaysMs);
 
   EXPECT_TRUE(result);
 }
 
 TEST(KnxdConnectorTest, FailsAfterAllStandardRetries) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   // Standard: 4 attempts total (1 immediate + 3 retries)
   mock.set_connect_fail_count(10);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", false, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, false, kTestDelaysMs);
 
   EXPECT_FALSE(result);
 }
 
 TEST(KnxdConnectorTest, FailsAfterAllExtendedRetries) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   // Extended: 6 attempts total (1 immediate + 5 retries)
   mock.set_connect_fail_count(10);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", true, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, true, kTestDelaysMs);
 
   EXPECT_FALSE(result);
 }
 
 TEST(KnxdConnectorTest, ExtendedRetriesThreeFailsThenSuccess) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   mock.set_connect_fail_count(3);  // 3 fails, 4th attempt succeeds
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", true, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, true, kTestDelaysMs);
 
   EXPECT_TRUE(result);
 }
 
 TEST(KnxdConnectorTest, StandardModeFailsOnFourthAttempt) {
   // With fail count = 4, standard mode (4 attempts) will fail all 4 times
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   mock.set_connect_fail_count(4);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", false, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, false, kTestDelaysMs);
 
   EXPECT_FALSE(result);
 }
 
 TEST(KnxdConnectorTest, ExtendedModeFailsOnSixthAttempt) {
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(true);
   mock.set_connect_fail_count(6);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", true, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, true, kTestDelaysMs);
 
   EXPECT_FALSE(result);
 }
 
 TEST(KnxdConnectorTest, ConnectReturnsFalseWhenConnectionFails) {
   // When the mock's connection_success_ is false, connect() always returns false
-  MockKnxdClient mock;
+  MockBusLink mock;
   mock.set_connection_success(false);
 
-  bool result = connect_knxd_with_retry(mock, "/run/knx", false, kTestDelaysMs);
+  bool result = connect_bus_with_retry(mock, false, kTestDelaysMs);
 
   EXPECT_FALSE(result);
 }
 
 }  // namespace
-}  // namespace cvknxd
+}  // namespace cvknx

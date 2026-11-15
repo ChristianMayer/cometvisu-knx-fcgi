@@ -14,21 +14,20 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
- * @file knxd_connector.cpp
- * @brief Implementation of the exponential backoff knxd connector.
+ * @file bus_connector.cpp
+ * @brief Bounded connect-with-retry helper for any BusLink.
  */
 
-#include "knxd_connector.h"
+#include "bus/bus_connector.h"
 
 #include <unistd.h>
 
 #include <array>
 #include <iostream>
 
-namespace cvknxd {
+namespace cvknx {
 
-bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
-                             bool has_worked_before, const int* custom_delays_ms) {
+bool connect_bus_with_retry(BusLink& link, bool has_worked_before, const int* custom_delays_ms) {
   // Retry delays in milliseconds applied BETWEEN attempts.
   // Standard (has_worked_before=false): 500ms, 1s, 2s  → 4 attempts total
   // Extended (has_worked_before=true):  500ms, 1s, 2s, 4s, 8s → 6 attempts total
@@ -38,24 +37,24 @@ bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
   const int total_attempts = num_retries + 1;
 
   for (int attempt = 1; attempt <= total_attempts; ++attempt) {
-    if (knxd.connect(socket_path)) {
+    if (link.connect()) {
       if (attempt > 1) {
-        std::cout << "[INFO] knxd connection succeeded after " << attempt << " attempts\n";
+        std::cout << "[INFO] Bus connection to " << link.label() << " succeeded after " << attempt
+                  << " attempts\n";
       }
       return true;
     }
     if (attempt < total_attempts) {
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-      int delay = delays_ms[attempt - 1];
-      std::cerr << "[WARN] knxd connection attempt " << attempt << "/" << total_attempts
+      const int delay = delays_ms[attempt - 1];
+      std::cerr << "[WARN] Bus connection attempt " << attempt << "/" << total_attempts
                 << " failed, retrying in " << delay << "ms...\n";
       ::usleep(static_cast<useconds_t>(delay) * 1000);
     }
   }
 
-  std::cerr << "[ERROR] knxd connection failed after " << total_attempts
-            << " attempts, giving up\n";
+  std::cerr << "[ERROR] Bus connection failed after " << total_attempts << " attempts, giving up\n";
   return false;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`KNX_TRANSPORT` is mandatory.** The backend no longer defaults to knxd.
+  All three transports — `knxd`, `ip-tunnel`, `ip-routing` — are equally
+  supported and the operator selects one explicitly. An unset or unknown value
+  logs `[ERROR]` and exits with status 1; it is never replaced by a silent
+  default (a wrong `ip-*` configuration must not look like a knxd outage).
+
+  Migration: add `KNX_TRANSPORT=knxd` to the environment of every existing
+  deployment to get 1.x behaviour unchanged.
+
+- **The outage block in `/r` and `/w` is transport-dependent.** It is still
+  `"knxd": {"ok": false, ...}` when `KNX_TRANSPORT=knxd`, but `"bus": {...}`
+  for the KNXnet/IP transports. The inner shape (`ok`/`since`/`lastOk`) is
+  identical; clients must ignore keys they do not know.
+
+- The build-time condition for knxd is now a CMake option,
+  `KNX_BUILD_KNXD_TRANSPORT` (default `ON`). With `-DKNX_BUILD_KNXD_TRANSPORT=OFF`
+  the project builds and runs without any knxd header or daemon.
+
+### Added
+
+- **KNXnet/IP IP tunneling** (`KNX_TRANSPORT=ip-tunnel`, `src/knxnetip/`): a
+  full tunnelling client — CONNECT/CONNECTIONSTATE/DISCONNECT handshake,
+  sequence numbers with duplicate and out-of-order rejection, TUNNELLING_ACK
+  with retransmission of the same sequence, heartbeat every
+  `KNX_IP_HEARTBEAT_SEC`, reconnect with the existing exponential backoff.
+  One tunnel serves all workers.
+- **KNXnet/IP IP routing** (`KNX_TRANSPORT=ip-routing`): multicast member of
+  `224.0.23.12`, stateless fire-and-forget sending, TTL 16, loop enabled. Works
+  with **no knxd installed**. Own echoes (`L_Data.req`) are dropped by the
+  codec, so a write is never delivered twice.
+- **Shared TX queue** (`src/state/shared_tx_queue.*`): a 256-slot ring in
+  shared memory plus an inherited `eventfd`. Workers only enqueue group
+  telegrams; the cache reader is the single owner of the bus connection for
+  RX *and* TX. `FCGI_WORKERS` therefore no longer multiplies knxd client slots
+  (one instead of `FCGI_WORKERS + 1`) or KNXnet/IP tunnels (one instead of one
+  per worker). A telegram that cannot be sent stays queued — a write is never
+  lost silently — and a write during an outage is rejected (`503`) instead of
+  being queued.
+- **Transport seam** (`src/bus/`): one `BusLink` interface, one implementation
+  per transport, and a `BusFactory` as the only place that knows them.
+  Handlers, router and cache never branch on the transport.
+- **cEMI codec** (`src/knxnetip/cemi.*`) and **KNXnet/IP framing**
+  (`src/knxnetip/knxnetip_frame.*`) with complete hex vectors in the unit
+  tests (`test_cemi`, `test_knxnetip_frame`).
+- **Discovery**: `cometvisu-knx-fcgi --discover` sends a SEARCH_REQUEST and
+  prints every answering device with its individual and multicast address
+  (`src/knxnetip/discovery.*`).
+- `test_bus_config`, `test_shared_tx_queue`, `test_shared_tx_bus_link`,
+  `test_knxnetip_frame`, `test_cemi`, `test_knxnetip_routing`,
+  `test_knxnetip_tunnel`, `test_discovery`.
+
 ### Changed
 
 - **The project is renamed from `cometvisu-knxd-fcgi` to `cometvisu-knx-fcgi`.**
@@ -15,16 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   <https://github.com/ChristianMayer/cometvisu-knx-fcgi>).  The CMake project
   name, the executable, the install target, the `--help`/`--version` output,
   the startup log line and the VS Code launch/task configurations all use the
-  new name.  The rename anticipates a direct KNXnet/IP transport (IP tunneling
-  and IP routing) next to the existing knxd transport; the knxd behaviour
-  itself is unchanged.
-  Deployments that start the binary by path (`spawn-fcgi`, container
+  new name.  Deployments that start the binary by path (`spawn-fcgi`, container
   entrypoints, systemd units) must be updated.  A symlink
   `cometvisu-knxd-fcgi -> cometvisu-knx-fcgi` keeps existing setups working
   during the transition.
-
-### Added
-
+- Namespace `cvknxd` → `cvknx`, CMake targets `cvknxd_*` → `cvknx_*`,
+  compile definition `CVKNXD_BINARY` → `CVKNX_BINARY`. All headers use
+  `#pragma once`.
+- The knxd client (now `KnxdClient`, a `BusLink`) opens one read-write group
+  socket in the cache reader instead of a write-only socket per worker.
+- `connect_knxd_with_retry()` became the transport-neutral
+  `connect_bus_with_retry()` (`src/bus/bus_connector.*`) and is used for the
+  short startup probe.
 - **Development container** (`.devcontainer/`) with the complete toolchain
   (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb), `libfcgi-dev`,
   `knxd`/`knxd-dev` for the knxd transport, and the networking tools needed for

@@ -18,12 +18,12 @@
 #include <thread>
 
 #include "handlers/read_handler.h"
-#include "mock_knxd_socket.h"
+#include "mock_bus_link.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/query_string.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 class ReadHandlerTest : public ::testing::Test {
 public:
@@ -33,7 +33,7 @@ public:
     (void)knxd_.open_group_socket(false);
   }
 
-  MockKnxdClient knxd_;  // NOLINT
+  MockBusLink knxd_;  // NOLINT
   SharedGroupCache cache_;
   SessionStore sessions_;
 };
@@ -589,7 +589,7 @@ public:
     (void)knxd_.open_group_socket(false);
   }
 
-  MockKnxdClient knxd_;  // NOLINT
+  MockBusLink knxd_;  // NOLINT
   SharedGroupCache cache_a_;
   SharedGroupCache cache_b_;
   SessionStore sessions_;
@@ -1115,8 +1115,8 @@ TEST_F(ReadHandlerTest, IndexMonotonicAcrossWrap) {
 
 TEST_F(ReadHandlerTest, ReportsTheKnxdOutageAs503AndStillServesCachedData) {
   cache_.push(0x0A03, {0x42});
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1500);
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1500);
 
   ReadHandler handler(cache_, knxd_, sessions_);
   auto r = handler.handle("a=1/2/3&t=-1");  // cache only, no poll
@@ -1130,7 +1130,7 @@ TEST_F(ReadHandlerTest, ReportsTheKnxdOutageAs503AndStillServesCachedData) {
 }
 
 TEST_F(ReadHandlerTest, OutageIsReportedWithoutWaitingForTheLongPollTimeout) {
-  cache_.publish_knxd_status(false, 1500);
+  cache_.publish_bus_status(false, 1500);
 
   ReadHandler handler(cache_, knxd_, sessions_);
   const auto start = std::chrono::steady_clock::now();
@@ -1145,12 +1145,12 @@ TEST_F(ReadHandlerTest, OutageIsReportedWithoutWaitingForTheLongPollTimeout) {
 }
 
 TEST_F(ReadHandlerTest, ReportsAnOutageThatStartsDuringThePoll) {
-  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_bus_status(true, 1000);
 
   // knxd dies while the request is waiting on the condition variable.
   std::thread killer([this] {
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    cache_.publish_knxd_status(false, 1010);
+    cache_.publish_bus_status(false, 1010);
   });
 
   ReadHandler handler(cache_, knxd_, sessions_);
@@ -1164,7 +1164,7 @@ TEST_F(ReadHandlerTest, ReportsAnOutageThatStartsDuringThePoll) {
 
 TEST_F(ReadHandlerTest, HasNoKnxdBlockWhileKnxdIsAvailable) {
   cache_.push(0x0A03, {0x42});
-  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_bus_status(true, 1000);
 
   ReadHandler handler(cache_, knxd_, sessions_);
   auto r = handler.handle("a=1/2/3&t=-1");

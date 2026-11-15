@@ -28,10 +28,11 @@
  * payload.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_KNXD_PROTOCOL_H_
-#define COMETVISU_KNXD_FCGI_KNXD_PROTOCOL_H_
+#pragma once
 
+#ifdef KNX_WITH_KNXD_TRANSPORT
 #include <eibtypes.h>
+#endif
 
 #include <cstdint>
 #include <optional>
@@ -39,7 +40,7 @@
 #include <string_view>
 #include <vector>
 
-namespace cvknxd {
+namespace cvknx {
 
 /**
  * @brief KNX group address in three-level X/Y/Z representation.
@@ -127,6 +128,7 @@ enum class ApduType : uint8_t {
 [[nodiscard]] bool parse_apdu(const std::vector<uint8_t>& apdu, ApduType& out_type,
                               std::vector<uint8_t>& out_data);
 
+#ifdef KNX_WITH_KNXD_TRANSPORT
 /**
  * @brief EIB message type constants sourced from knxd's <eibtypes.h>.
  *
@@ -139,6 +141,7 @@ inline constexpr uint16_t OPEN_GROUPCON = EIB_OPEN_GROUPCON;
 inline constexpr uint16_t GROUP_PACKET = EIB_GROUP_PACKET;
 inline constexpr uint16_t APDU_PACKET = EIB_APDU_PACKET;
 }  // namespace EibMessageType
+#endif
 
 /// Build a complete eibd wire message.
 /// Format: [2 bytes length, big-endian] [payload]
@@ -148,6 +151,7 @@ inline constexpr uint16_t APDU_PACKET = EIB_APDU_PACKET;
 [[nodiscard]] std::vector<uint8_t> build_eibd_message(uint16_t type,
                                                       const std::vector<uint8_t>& data);
 
+#ifdef KNX_WITH_KNXD_TRANSPORT
 /// Build an EIB_OPEN_GROUPCON wire message.
 /// knxd >= 0.14 expects a 5-byte payload: [type:2][reserved:2][write_only:1].
 /// @param write_only If true, no group telegrams will be delivered.
@@ -161,6 +165,7 @@ inline constexpr uint16_t APDU_PACKET = EIB_APDU_PACKET;
 /// @return Complete wire-format message ready to send.
 [[nodiscard]] std::vector<uint8_t> build_group_packet(uint16_t group_addr,
                                                       const std::vector<uint8_t>& apdu);
+#endif
 
 /// Parse a received eibd wire message.
 /// @param raw Raw bytes received from socket.
@@ -182,6 +187,4 @@ inline constexpr size_t kMaxReadBufferSize = 1048576;
 ///         if no complete message is available yet.
 [[nodiscard]] std::optional<std::vector<uint8_t>> try_extract_message(std::vector<uint8_t>& buffer);
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_KNXD_PROTOCOL_H_
+}  // namespace cvknx

@@ -15,7 +15,7 @@
 
 #include "group_cache.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 void GroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -100,4 +100,4 @@ void GroupCache::clear() {
   position_.store(0);
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

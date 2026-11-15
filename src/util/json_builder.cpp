@@ -20,7 +20,7 @@
 
 #include "json_builder.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 void JsonBuilder::start_object() {
   buffer_.push_back('{');
@@ -115,4 +115,4 @@ void JsonBuilder::add_raw(std::string_view raw) {
   first_ = false;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

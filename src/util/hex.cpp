@@ -23,7 +23,7 @@
 #include <array>
 #include <cctype>
 
-namespace cvknxd {
+namespace cvknx {
 
 std::vector<uint8_t> hex_decode(std::string_view hex) {
   if (hex.size() % 2 != 0) {
@@ -71,4 +71,4 @@ std::string hex_byte(uint8_t byte) {
   return hex_encode(&byte, 1);
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

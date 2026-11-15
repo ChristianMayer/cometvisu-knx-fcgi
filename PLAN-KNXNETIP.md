@@ -1,8 +1,16 @@
 # PLAN-KNXNETIP.md — Direct KNXnet/IP transport (no knxd)
 
-**Status:** proposed, not started
-**Target:** `cometvisu-knx-fcgi` ≥ 1.3.0
+**Status:** implemented in 2.0.0 (P0–P8)
+**Target:** `cometvisu-knx-fcgi` **2.0.0**
 **Audience:** the implementing LLM agent (and the human reviewing its work)
+
+> **Decisions locked 2026-11-15** (see §8): all three transports are equally
+> supported and the operator must choose one explicitly (no default); the
+> outage key is `"knxd"` for the knxd transport and `"bus"` otherwise; KNX IP
+> Secure stays out of scope; the shared TX queue is used by **all** transports,
+> so the cache reader is the single bus owner for RX *and* TX.
+> Because the startup contract changes (`KNX_TRANSPORT` becomes required) and
+> a new JSON key appears, this work ships as **2.0.0**, not 1.3.0.
 
 ---
 
@@ -71,8 +79,8 @@ need the features knxd adds).
 | APDU encode/decode (`[0x00, APCI\|value]`) | `src/knxd/knxd_protocol.{h,cpp}` | **Reused unchanged** — cEMI carries the identical APDU. |
 | Group address mapping `X/Y/Z → (X<<11)\|(Y<<8)\|Z` | `knxd_protocol.{h,cpp}` | Reused unchanged. |
 | `SharedGroupCache` + position counter + condvar | `src/state/shared_group_cache.{h,cpp}` | Unchanged. |
-| `run_cache_reader()` resilient loop | `src/knxd/cache_reader.{h,cpp}` | Extended (P5) to also drain a TX queue; the reconnect/backoff/no-busy-loop semantics stay. |
-| Outage reporting (`knxd_status_json`) | `src/handlers/knxd_status_json.{h,cpp}` | Unchanged contract; only the producer changes (P1/P8). |
+| `run_cache_reader()` resilient loop | `src/knxd/cache_reader.{h,cpp}` | Extended (P4) to also drain a TX queue; the reconnect/backoff/no-busy-loop semantics stay. |
+| Outage reporting (`knxd_status_json`) | `src/handlers/knxd_status_json.{h,cpp}` | Same shape, **transport-dependent key** `"knxd"` / `"bus"` (§8 Q2); rename to `add_bus_outage()` (P1). |
 | Fork-based worker pool + supervisor | `src/main.cpp`, `src/fcgi/` | Unchanged. |
 | `MockKnxdClient` | `mocks/mock_knxd_socket.{h,cpp}` | Rename → `MockBusLink` (P1). |
 
@@ -135,21 +143,32 @@ handlers/loop never see a socket path or an IP address.  `open_group_socket()`
 disappears: for knxd it becomes an internal detail of `KnxdBusLink::connect()`;
 for KNXnet/IP it is meaningless.
 
+**Rule:** one `BusLink` implementation per transport, and *nothing else* in the
+codebase may know which one is in use.  If an `if (transport == …)` appears
+outside `main.cpp` / `BusFactory`, the abstraction is wrong — fix the seam
+instead of adding the branch.  This is what keeps the three transports at
+maximal shared code and minimal total size.
+
 ### 3.2 Process model impact — the one real constraint
 
 A KNX IP interface offers only **~4 concurrent tunnels** (MDT, Gira, Siemens,
 …), while the pool runs `FCGI_WORKERS` (default 20) processes.  Therefore:
 
-| Transport | Receiving | Sending | Tunnels needed |
+| Transport | Receiving | Sending | Bus connections needed |
 |---|---|---|---|
-| `knxd` | cache reader (RW group socket) | each worker, own write-only socket | knxd client slots (`FCGI_WORKERS + 1`) |
-| `ip-routing` | cache reader (joined multicast group) | each worker, **own send-only UDP socket** (no join) | **0** (stateless) |
+| `knxd` | cache reader (RW group socket) | **shared TX queue → cache reader** | **1** |
+| `ip-routing` | cache reader (joined multicast group) | **shared TX queue → cache reader** | **1** (stateless) |
 | `ip-tunnel` | cache reader (tunnel owner) | **shared TX queue → cache reader** | **1** |
 
-Routing is stateless, so it needs no coordination.  Tunneling must be
-centralised in the cache-reader process (§3.3).
+All three transports therefore have the **same process shape**: exactly one
+process (the cache reader) owns the bus link for RX *and* TX, and every worker
+only enqueues into the shared TX queue (§3.3, §8 Q4).  That is why
+`FCGI_WORKERS` never appears in the right-hand column: a tunnel limit of ~4 is
+irrelevant, and knxd needs a single client slot instead of `FCGI_WORKERS + 1`.
+It also removes `open_group_socket()` and per-worker socket bookkeeping from the
+worker path — less code, one fewer class of bug.
 
-### 3.3 Shared TX queue (tunneling only)
+### 3.3 Shared TX queue (all transports)
 
 - `SharedTxQueue` — fixed-size ring (e.g. 256 slots) in
   `mmap(MAP_SHARED|MAP_ANONYMOUS)`, one slot =
@@ -158,8 +177,9 @@ centralised in the cache-reader process (§3.3).
   `SharedGroupCache`.
 - An `eventfd(0, EFD_NONBLOCK)` created by the parent **before** forking is
   inherited by all children; a worker `write()`s 8 bytes after enqueueing.
-- The cache reader polls `{tunnel_fd, tx_eventfd}`; on the event it drains the
-  queue, sends, and waits for the tunneling ACK (with retransmission).
+- The cache reader polls `{link_fd, tx_eventfd}`; on the event it drains the
+  queue and sends through its bus link — for `ip-tunnel` including the ACK /
+  retransmission handshake, for `knxd` and `ip-routing` a plain send.
 - A full queue makes `send_group_packet()` return `false` → `/w` answers
   `503`, exactly like a failed write today.
 - While the bus link is unavailable, `send_group_packet()` must return `false`
@@ -172,7 +192,7 @@ centralised in the cache-reader process (§3.3).
 
 | Variable | Default | Applies to | Meaning |
 |---|---|---|---|
-| `KNX_TRANSPORT` | `knxd` | all | `knxd` \| `ip-tunnel` \| `ip-routing` |
+| `KNX_TRANSPORT` | *(required)* | all | `knxd` \| `ip-tunnel` \| `ip-routing`; unset or unknown is a startup error |
 | `KNXD_SOCKET` | `/run/knx` | knxd | Unix socket path |
 | `KNX_IP_HOST` | *(unset)* | ip-tunnel | IP interface / router address |
 | `KNX_IP_PORT` | `3671` | ip-tunnel, ip-routing | UDP port |
@@ -184,9 +204,15 @@ centralised in the cache-reader process (§3.3).
 | `KNX_IP_ACK_TIMEOUT_MS` | `1000` | ip-tunnel | wait for `TUNNELING_ACK` before retransmitting |
 | `KNX_IP_RETRIES` | `3` | ip-tunnel | retransmissions per telegram before giving up |
 
-Backwards compatible: `KNX_TRANSPORT` unset keeps today's behaviour exactly.
+**Breaking change (2.0.0):** `KNX_TRANSPORT` has **no default**.  A process
+started without it (or with an unknown value) logs `[ERROR]` naming the three
+valid values and exits 1.  This is deliberate — silently falling back to `knxd`
+would turn an `ip-*` misconfiguration into what looks like a bus outage.  The
+release notes must show the one-line migration: `KNX_TRANSPORT=knxd` restores
+1.x behaviour exactly.  All other variables keep their current defaults.
+
 New variables are printed in the existing startup configuration dump and in
-`--help`.
+`--help` (including the fact that `KNX_TRANSPORT` is mandatory).
 
 ---
 
@@ -338,7 +364,7 @@ Rules:
   exponential backoff (500 ms … 30 s) from `run_cache_reader()`.
 - The reconnect must reuse the reader loop: `wait_for_activity()` returns
   `Error`, the loop reconnects, exactly as with knxd.  No new spin loop.
-- Publish availability through `SharedGroupCache::publish_knxd_status()`
+- Publish availability through `SharedGroupCache::publish_bus_status()`
   so `/r` and `/w` report the outage (unchanged JSON).
 
 ### 5.7 Routing
@@ -394,9 +420,11 @@ succeeds; no `cvknxd` string left in `src/`, `tests/`, `mocks/`.
 ### P1 — Transport seam and configuration (1–2 days)
 
 1. **Tests:** `tests/unit/test_bus_config.cpp`
-   - `KNX_TRANSPORT=knxd` (default) → `BusConfig::transport == Knxd`
+   - `KNX_TRANSPORT` unset → error naming the three valid values (exit 1, no default)
+   - `KNX_TRANSPORT=knxd` → `BusConfig::transport == Knxd`
    - `ip-tunnel` / `ip-routing` parsed; unknown value → error + `400`-style
      startup failure (log `[ERROR]` and exit 1)
+   - `BusConfig::outage_key()` → `"knxd"` for knxd, `"bus"` for both ip transports (§8 Q2)
    - numeric parsing: port range, heartbeat ≥ 10, retries ≥ 1; invalid value →
      error, never a silent default
    - `KNX_IP_HOST` required for `ip-tunnel`, ignored otherwise
@@ -409,10 +437,17 @@ succeeds; no `cvknxd` string left in `src/`, `tests/`, `mocks/`.
 3. `BusFactory` (`src/bus/bus_factory.{h,cpp}`): transport → `BusLink`.
 4. `main.cpp` / `run_cache_reader()`: take `BusConfig` instead of
    `socket_path`; log the effective configuration.
-5. Update AGENTS.md (file table: `src/bus/`, `src/knxnetip/`), README env table.
+5. `knxd_status_json`: rename `add_knxd_outage()` → `add_bus_outage()` and
+   `publish_knxd_status()` / `knxd_status()` → `publish_bus_status()` /
+   `bus_status()` (all transports use them now), the JSON key coming from
+   `BusConfig::outage_key()`.  **Tests:** `tests/unit/test_knxd_status_json.cpp`
+   covers both keys with the same body shape.
+6. Update AGENTS.md (file table: `src/bus/`, `src/knxnetip/`), README env table
+   (mark `KNX_TRANSPORT` as required, add a migration note), CHANGELOG 2.0.0.
 
-**Acceptance:** `KNX_TRANSPORT` defaults to `knxd` and **all existing behaviour
-tests pass unchanged**; `--help` lists the new variables.
+**Acceptance:** `KNX_TRANSPORT=knxd` reproduces today's behaviour exactly and
+**all existing behaviour tests pass unchanged**; unset or unknown values fail at
+startup; `--help` lists the new variables and marks `KNX_TRANSPORT` mandatory.
 
 ### P2 — cEMI codec (2–3 days)
 
@@ -457,34 +492,11 @@ and parsers.
 **Acceptance:** every builder produces bytes matching the vectors; every parser
 validates lengths before reading.
 
-### P4 — IP routing transport (2–3 days)
+### P4 — Shared TX queue and single-owner refactor (3–4 days)
 
-Smallest end-to-end win: no connection, no sequence numbers, no heartbeat.
-
-1. **Tests:** `tests/unit/test_knxnetip_routing.cpp` with a loopback UDP peer on
-   an ephemeral port (never 3671 — CI must not depend on a fixed port):
-   - `SendsRoutingIndicationWithCemi` (peer receives exactly one datagram, bytes match P2 vector)
-   - `ReceivesRoutingIndication` → `poll_group_telegram()` yields address + APDU
-   - `IgnoresOwnEcho` (documented policy: echoes are delivered; dedupe is the
-     handler's job — assert the current contract explicitly)
-   - `SendFailsWhenSocketBroken` → `false`, no exception
-   - `DoesNotSpinWhenSocketSilent` (measure CPU: `wait_for_activity(200)` returns
-     `Timeout` after ≈200 ms, using `steady_clock`)
-2. `RoutingBusLink : BusLink` — one RX socket (joined group, `SO_REUSEADDR`) for
-   the cache reader, one send socket per worker process; `get_fd()` = RX socket.
-3. Config plumbing (`KNX_IP_MULTICAST`, `KNX_IP_IFACE`, `KNX_IP_PORT`).
-4. E2E test (`tests/e2e/test_routing_e2e.cpp`): start the binary with
-   `KNX_TRANSPORT=ip-routing` against a fake router on loopback, do `/w`, assert
-   the datagram, inject a `ROUTING_INDICATION`, assert `/r` returns it with a
-   monotonically increasing `i`.
-
-**Acceptance:** an installation can run `/l`, `/r`, `/w` with
-`KNX_TRANSPORT=ip-routing` and **no knxd installed**; interop smoke test against
-`knxd` in `ip:` mode documented in `tools/`.
-
-### P5 — Shared TX queue and single-owner refactor (2–3 days)
-
-Prerequisite for tunneling.  Refactor only — no new protocol.
+Prerequisite for **every** transport (§8 Q4).  Refactor only — no new protocol.
+After this phase no worker process owns a bus connection of any kind: workers
+enqueue, the cache reader sends.
 
 1. **Tests:** `tests/unit/test_shared_tx_queue.cpp`
    - `PushPopFifo`, `FifoAcrossAttachedInstances` (two `attach()` views)
@@ -502,12 +514,50 @@ Prerequisite for tunneling.  Refactor only — no new protocol.
    - `DrainsTxQueueBeforePolling`
    - `TxQueueDrainedWhenLinkIdle` (eventfd wakes the loop, no 1 s latency)
    - `TxDuringOutageIsRejectedNotQueued`
-5. Keep the knxd transport on its current per-worker sockets in this phase
-   (behaviour must not change); switching knxd to the queue as well is a
-   **follow-up decision** (§8, Q4).
+5. **Switch knxd onto the queue** (§8 Q4): the cache reader opens the single
+   read-write group socket (`open_group_socket()` becomes internal to
+   `KnxdBusLink::connect()`); workers get `SharedTxBusLink` and never open a
+   socket again.  `/w` failure semantics are unchanged: full queue or an
+   unavailable link → `false` → `503`.  If the write-only mode of
+   `open_group_socket()` is now dead code, delete it.
+   **Tests:** `tests/integration/test_write_handler.cpp` gains
+   `KnxdWriteGoesThroughTxQueue` (the worker owns no fd) and
+   `KnxdWriteFailsWhenQueueFull`; `test_knxd_client.cpp` asserts exactly one
+   knxd connection per process after startup.
+6. Rewrite AGENTS.md design decisions 2, 4 and 8 in this PR — they describe the
+   old per-worker socket model.
 
 **Acceptance:** `/w` latency budget unchanged (< 100 ms observed in
-`test_concurrent_clients`); the cache reader still never busy-loops.
+`test_concurrent_clients`); the cache reader still never busy-loops; a running
+knxd sees exactly **one** client connection regardless of `FCGI_WORKERS`.
+
+### P5 — IP routing transport (2–3 days)
+
+Smallest end-to-end win on the new model: no connection, no sequence numbers,
+no heartbeat.  Workers already use `SharedTxBusLink` (P4), so only the cache
+reader has to learn the transport.
+
+1. **Tests:** `tests/unit/test_knxnetip_routing.cpp` with a loopback UDP peer on
+   an ephemeral port (never 3671 — CI must not depend on a fixed port):
+   - `SendsRoutingIndicationWithCemi` (peer receives exactly one datagram, bytes match P2 vector)
+   - `ReceivesRoutingIndication` → `poll_group_telegram()` yields address + APDU
+   - `IgnoresOwnEcho` (documented policy: echoes are delivered; dedupe is the
+     handler's job — assert the current contract explicitly)
+   - `SendFailsWhenSocketBroken` → `false`, no exception
+   - `DoesNotSpinWhenSocketSilent` (measure CPU: `wait_for_activity(200)` returns
+     `Timeout` after ≈200 ms, using `steady_clock`)
+2. `RoutingBusLink : BusLink` — **one** UDP socket owned by the cache reader:
+   joined to `KNX_IP_MULTICAST` (`SO_REUSEADDR`) for RX, and used for `sendto()`
+   with `IP_MULTICAST_TTL` = 16; `get_fd()` = that socket.
+3. Config plumbing (`KNX_IP_MULTICAST`, `KNX_IP_IFACE`, `KNX_IP_PORT`).
+4. E2E test (`tests/e2e/test_routing_e2e.cpp`): start the binary with
+   `KNX_TRANSPORT=ip-routing` against a fake router on loopback, do `/w`, assert
+   the datagram, inject a `ROUTING_INDICATION`, assert `/r` returns it with a
+   monotonically increasing `i` and that the outage key is `"bus"`.
+
+**Acceptance:** an installation can run `/l`, `/r`, `/w` with
+`KNX_TRANSPORT=ip-routing` and **no knxd installed**; interop smoke test against
+`knxd` in `ip:` mode documented in `tools/`.
 
 ### P6 — KNXnet/IP tunneling client (4–6 days)
 
@@ -528,7 +578,7 @@ The main work item.  `src/knxnetip/tunneling_bus_link.{h,cpp}`.
      `CONNECTIONSTATE_REQUEST`, answers, asserts connection kept)
    - `ReconnectsAfterConnectionStateError` (`0x04` → reconnect with backoff)
    - `DisconnectSendsDisconnectRequest` (best effort, ignores failure)
-   - `NoBusyLoopWhenSocketSilent` (CPU guard as in P4)
+   - `NoBusyLoopWhenSocketSilent` (CPU guard as in P5)
 2. Implement the session state machine: connect → run (heartbeat timer, RX
    dispatch, ACK) → disconnect; `wait_for_activity()` handles the heartbeat
    deadline internally (never blocks past the next heartbeat).
@@ -553,11 +603,16 @@ answers with a fixed DIB; assert parse + log line; two answers and no
 
 ### P8 — Docs, interop, release (2–3 days)
 
-- README: three transports, a "no knxd needed" quick start, container hints
-  (UDP 3671 must be reachable; multicast usually needs host networking).
-- AGENTS.md: transport abstraction, TX queue, cEMI rules (the `L_Data.con`
-  trap), tunnel-limit rule.
-- CHANGELOG: `1.3.0` entry.
+- README: three equally supported transports, a "no knxd needed" quick start,
+  the **required** `KNX_TRANSPORT` with the migration line
+  (`KNX_TRANSPORT=knxd` restores 1.x behaviour), container hints (UDP 3671 must
+  be reachable; multicast usually needs host networking).
+- AGENTS.md: transport abstraction and the no-branching rule, shared TX queue /
+  single-owner model, cEMI rules (the `L_Data.con` trap), tunnel-limit rule,
+  outage-key semantics (`knxd` vs `bus`).
+- CHANGELOG: **`2.0.0`** entry with an explicit *Breaking changes* section
+  (required `KNX_TRANSPORT`, `"bus"` outage key for the ip transports); bump
+  `VERSION`.
 - `tools/` scripts: start a fake router, run a routing interop test against
   `knxd`.
 - Optional CI job that builds with `-DKNX_BUILD_KNXD_TRANSPORT=OFF`.
@@ -586,16 +641,24 @@ answers with a fixed DIB; assert parse + log line; two answers and no
 
 ---
 
-## 8. Open questions (decide before P6, do not guess)
+## 8. Decisions (locked 2026-11-15)
 
-| # | Question | Recommendation |
+These were open questions; they are now decided and binding for every phase.
+Do not re-open them during implementation — if a phase cannot satisfy one, stop
+and raise it instead of silently diverging.
+
+| # | Question | Decision |
 |---|---|---|
-| Q1 | Should `ip-tunnel` become the default transport in 1.3.0? | No. Keep `knxd` default for one release; add a note that it will switch in 1.4.0. |
-| Q2 | Rename the client-facing outage key `"knxd"` → `"bus"`? | Not without a CometVisu client change. Keep `"knxd"` (clients must ignore unknown keys) and document the semantics. |
-| Q3 | Do we need KNX IP Secure? | Out of scope; separate plan. If a deployment needs it, knxd remains the answer for now. |
-| Q4 | Should the knxd transport also use the shared TX queue (freeing `FCGI_WORKERS + 1` knxd slots)? | Attractive simplification, but it changes `/w` failure semantics. Do it as a separate change after 1.3.0 with its own tests. |
-| Q5 | Reduce the number of forked workers for tunneling? | Not needed: one tunnel serves all workers via the TX queue. |
+| Q1 | Relative importance / default transport | **All three transports are equally supported and none is a default.** `knxd`, `ip-tunnel` and `ip-routing` are first-class; the operator selects one via `KNX_TRANSPORT`. Unset or unknown → `[ERROR]` + exit 1, never a silent fallback. |
+| Q2 | Client-facing outage key | Transport-dependent: `"knxd"` when `KNX_TRANSPORT=knxd` (keeps existing CometVisu deployments unchanged), `"bus"` for `ip-tunnel` and `ip-routing`. Inner shape identical (`ok` / `since` / `lastOk`); produced by one `add_bus_outage(json, status, key)` from `BusConfig::outage_key()`. |
+| Q3 | KNX IP Secure | Out of scope. Keep the frame-codec seam so a `SecureWrapper` can wrap it later without touching any transport. |
+| Q4 | Shared TX queue for all transports? | **Yes — all three.** Workers never own a bus connection; the cache reader is the single owner of RX *and* TX. Removes the `FCGI_WORKERS + 1` knxd slot requirement (→ 1), per-worker `open_group_socket()`, and the per-worker send sockets routing would otherwise need. `/w` failure semantics are unchanged (`false` → `503`). |
+| Q5 | Fewer forked workers for tunneling? | No. One tunnel serves all workers through the TX queue. |
 | Q6 | Routing availability detection | `sendto()` errors + `ROUTING_LOST_MESSAGE`; do not fabricate a heartbeat. |
+
+Consequences baked into the phases above: Q1 + Q2 are **breaking** (required
+variable, new JSON key) → release **2.0.0**; Q4 moves the shared TX queue to
+**P4**, before the first new transport (P5).
 
 ---
 
@@ -620,8 +683,8 @@ answers with a fixed DIB; assert parse + log line; two answers and no
 | P1 | `BusLink` seam, config, factory | ~150 | 1–2 |
 | P2 | cEMI codec | 300–400 | 2–3 |
 | P3 | KNXnet/IP framing | 200–250 | 1–2 |
-| P4 | IP routing transport | 150–250 | 2–3 |
-| P5 | shared TX queue + single owner | 200–300 | 2–3 |
+| P4 | shared TX queue + single owner (+ knxd switch) | 250–350 | 3–4 |
+| P5 | IP routing transport | 150–250 | 2–3 |
 | P6 | tunneling session | 250–350 | 4–6 |
 | P7 | discovery/diagnostics | 200 | 1–2 |
 | P8 | docs, interop, release | — | 2–3 |

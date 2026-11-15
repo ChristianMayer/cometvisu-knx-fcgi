@@ -20,7 +20,7 @@
 
 #include "query_string.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 namespace {
 
@@ -138,4 +138,4 @@ bool QueryString::has(std::string_view key) const {
   return params_.find(key) != params_.end();
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

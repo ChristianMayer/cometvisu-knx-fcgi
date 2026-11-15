@@ -1,6 +1,7 @@
 # Build
 build/
 build-rel/
+build-noknxd/
 cmake-build-*/
 
 # IDE
@@ -17,6 +18,10 @@ cmake-build-*/
 *.a
 *.so
 *.dylib
+
+# Python (helper scripts under tools/)
+__pycache__/
+*.py[cod]
 
 # Test
 Testing/

@@ -38,7 +38,7 @@
 
 #include "fcgi/fcgi_server.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 namespace {
 

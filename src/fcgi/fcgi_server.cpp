@@ -48,7 +48,7 @@
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,readability-redundant-declaration)
 extern char** environ;
 
-namespace cvknxd {
+namespace cvknx {
 
 /// Maximum allowed request body size (64 KB).
 /// Prevents OOM from a malicious CONTENT_LENGTH.
@@ -470,4 +470,4 @@ void FcgiServer::write_response(const FcgiResponse& response) {
   }
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

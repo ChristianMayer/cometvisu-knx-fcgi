@@ -21,7 +21,7 @@
 #include <cerrno>
 #include <cstring>
 
-namespace cvknxd {
+namespace cvknx {
 
 SharedGroupCache::~SharedGroupCache() {
   if (data_ != nullptr && owns_mmap_) {
@@ -277,7 +277,7 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
   }
 
   // Compute absolute timeout using monotonic clock.
-  struct timespec ts{};
+  struct timespec ts {};
   ::clock_gettime(CLOCK_MONOTONIC, &ts);
   int64_t total_ns =
       static_cast<int64_t>(ts.tv_nsec) + static_cast<int64_t>(timeout_ms) * 1'000'000LL;
@@ -308,11 +308,11 @@ void SharedGroupCache::notify_all() {
   }
 }
 
-void SharedGroupCache::publish_knxd_status(bool available) {
-  publish_knxd_status(available, static_cast<uint32_t>(std::time(nullptr)));
+void SharedGroupCache::publish_bus_status(bool available) {
+  publish_bus_status(available, static_cast<uint32_t>(std::time(nullptr)));
 }
 
-void SharedGroupCache::publish_knxd_status(bool available, uint32_t now) {
+void SharedGroupCache::publish_bus_status(bool available, uint32_t now) {
   if (data_ == nullptr) {
     return;
   }
@@ -333,8 +333,8 @@ void SharedGroupCache::publish_knxd_status(bool available, uint32_t now) {
   data_->knxd_available.store(0);
 }
 
-SharedGroupCache::KnxdStatus SharedGroupCache::knxd_status() const {
-  KnxdStatus status;
+SharedGroupCache::BusStatus SharedGroupCache::bus_status() const {
+  BusStatus status;
   if (data_ == nullptr) {
     return status;
   }
@@ -344,4 +344,4 @@ SharedGroupCache::KnxdStatus SharedGroupCache::knxd_status() const {
   return status;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

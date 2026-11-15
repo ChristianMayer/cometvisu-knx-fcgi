@@ -17,7 +17,7 @@
 
 #include "util/query_string.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 TEST(QueryStringTest, EmptyInput) {
   QueryString qs("");

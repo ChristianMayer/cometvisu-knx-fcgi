@@ -17,7 +17,7 @@
 
 #include "util/json_builder.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 TEST(JsonBuilderTest, Empty) {
   JsonBuilder jb;

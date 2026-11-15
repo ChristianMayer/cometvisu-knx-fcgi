@@ -4,10 +4,22 @@ FastCGI backend in modern C++ that implements the
 [CometVisu Protocol](https://github.com/CometVisu/CometVisu/wiki/Protocol)
 and connects to the KNX bus.
 
-Today bus access goes through a local [knxd](https://github.com/knxd/knxd)
-daemon over a Unix socket.  A direct KNXnet/IP transport (IP tunneling and IP
-routing, no knxd required) is planned — see
-[PLAN-KNXNETIP.md](PLAN-KNXNETIP.md).
+Today bus access goes through one of three transports, all equally supported:
+
+| `KNX_TRANSPORT` | Transport                          | Needs                      |
+|-----------------|------------------------------------|----------------------------|
+| `knxd`          | knxd daemon over a Unix socket     | knxd running locally       |
+| `ip-tunnel`     | KNXnet/IP tunnelling client        | a KNX IP interface/router  |
+| `ip-routing`    | KNXnet/IP multicast routing member | a KNX IP router            |
+
+`KNX_TRANSPORT` is **required** — there is no default, so a misconfiguration
+can never be mistaken for a bus outage.  `ip-routing` and `ip-tunnel` need no
+knxd at all; `-DKNX_BUILD_KNXD_TRANSPORT=OFF` builds a binary without any knxd
+dependency.
+
+> **Migrating from 1.x**: add `KNX_TRANSPORT=knxd` to the environment. The
+> outage block in `/r`/`/w` is still `"knxd": {...}` for that transport and
+> `"bus": {...}` for the KNXnet/IP transports.
 
 > **Renamed**: this project was called `cometvisu-knxd-fcgi` up to and including
 > v1.2.1.  The repository now lives at
@@ -66,22 +78,38 @@ and built automatically after the container is created; the existing
 ctest --test-dir build --output-on-failure
 
 # Run via spawn-fcgi (traditional FastCGI mode)
-spawn-fcgi -p 9000 -n ./build/src/cometvisu-knx-fcgi
+KNX_TRANSPORT=knxd spawn-fcgi -p 9000 -n ./build/src/cometvisu-knx-fcgi
 
 # Run standalone (direct socket — no spawn-fcgi needed)
-FCGI_SOCKET=:9000 ./build/src/cometvisu-knx-fcgi
+KNX_TRANSPORT=knxd FCGI_SOCKET=:9000 ./build/src/cometvisu-knx-fcgi
 
-# Run standalone on a Unix socket
-FCGI_SOCKET=/tmp/cometvisu-fcgi.sock ./build/src/cometvisu-knx-fcgi
+# Direct KNXnet/IP connection, no knxd needed
+KNX_TRANSPORT=ip-tunnel KNX_IP_HOST=192.168.1.10 FCGI_SOCKET=:9000 \
+    ./build/src/cometvisu-knx-fcgi
+KNX_TRANSPORT=ip-routing KNX_IP_IFACE=eth0 FCGI_SOCKET=:9000 \
+    ./build/src/cometvisu-knx-fcgi
+
+# Which devices answer?
+./build/src/cometvisu-knx-fcgi --discover
 ```
 
 ### Environment variables
 
 | Variable              | Default    | Description                              |
 |-----------------------|------------|------------------------------------------|
-| `KNXD_SOCKET`         | `/run/knx` | Path to the knxd Unix socket             |
+| `KNX_TRANSPORT`       | **required** | `knxd`, `ip-tunnel` or `ip-routing`. Unset or unknown → startup error. |
+| `KNXD_SOCKET`         | `/run/knx` | knxd transport: path to the knxd Unix socket |
+| `KNX_IP_HOST`         | *(required for `ip-tunnel`)* | Address of the KNX IP interface/router |
+| `KNX_IP_PORT`         | `3671`     | KNXnet/IP UDP port                       |
+| `KNX_IP_LOCAL_ADDR`   | *(OS choice)* | `ip-tunnel`: local address advertised in the HPAI (NAT friendly when unset) |
+| `KNX_IP_MULTICAST`    | `224.0.23.12` | `ip-routing`: multicast group          |
+| `KNX_IP_IFACE`        | *(default)* | `ip-routing`: interface for the group join / `IP_MULTICAST_IF` |
+| `KNX_IP_NAT`          | `0`        | `ip-tunnel`: `1` = NAT mode              |
+| `KNX_IP_HEARTBEAT_SEC`| `60`       | `ip-tunnel`: `CONNECTIONSTATE_REQUEST` interval (10–86400) |
+| `KNX_IP_ACK_TIMEOUT_MS`| `1000`    | `ip-tunnel`: ACK timeout before retransmitting (10–60000) |
+| `KNX_IP_RETRIES`      | `3`        | `ip-tunnel`: retransmissions per telegram (1–10) |
 | `FCGI_SOCKET`         | *(unset)*  | Direct FCGI socket (`:port` for TCP, or filesystem path for Unix socket). When set, the server runs standalone without `spawn-fcgi`. |
-| `FCGI_WORKERS`        | `20`       | Number of worker processes in direct socket mode (1–256). Each worker handles one concurrent client using `fork()`-based pre-forking. Idle workers cost ~few MB resident RAM each. |
+| `FCGI_WORKERS`        | `20`       | Number of worker processes in direct socket mode (1–256). Each worker handles one concurrent client using `fork()`-based pre-forking. Idle workers cost ~few MB resident RAM each. Workers never open a bus connection of their own — they enqueue writes into the shared TX queue. |
 | `LONGPOLL_TIMEOUT_SEC`| `300`      | Max seconds to wait in long-poll `/r`    |
 | `BASE_URL`            | *(unset)*  | When set, the login (`/l`) response includes a config object `"c"` with `"baseURL"` set to this value. Used by the web server to advertise the URL prefix under which the backend is reachable (e.g. `/proxy/visu`). |
 | `DEBUG_BACKEND`       | *(unset)*  | Set to `1` to enable debug logging to stderr |
@@ -90,9 +118,10 @@ At startup, the server logs the effective values of all configuration
 environment variables to stdout:
 
 ```
-[INFO] cometvisu-knx-fcgi 1.2.1 starting
+[INFO] cometvisu-knx-fcgi 2.0.0 starting
 [INFO] Configuration:
-[INFO]   KNXD_SOCKET           /run/knx
+[INFO]   KNX_TRANSPORT        knxd
+[INFO]   BUS                  transport=knxd socket=/run/knx
 [INFO]   FCGI_SOCKET           (not set, spawn-fcgi mode)
 [INFO]   FCGI_WORKERS          10
 [INFO]   LONGPOLL_TIMEOUT_SEC  300

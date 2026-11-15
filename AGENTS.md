@@ -3,9 +3,10 @@
 This file provides guidelines for AI coding agents working on the
 `cometvisu-knx-fcgi` project.
 
-**Roadmap:** [PLAN-KNXNETIP.md](PLAN-KNXNETIP.md) is the executable, TDD-based
-implementation plan for the direct KNXnet/IP transport (IP tunneling and IP
-routing, no knxd).  Follow its phases in order when working on that feature.
+**Roadmap:** [PLAN-KNXNETIP.md](PLAN-KNXNETIP.md) is the TDD-based
+implementation plan for the transport layer.  Phases P0–P8 are implemented in
+2.0.0; use it as the design record and keep its decisions (§8) when extending
+the code.
 
 **Development container:** `.devcontainer/` provides the full toolchain
 (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb, `libfcgi-dev`,
@@ -49,7 +50,7 @@ ctest --test-dir build -V
 - `.clang-format` and `.clang-tidy` are in the repository root.
 - Run `clang-format -i <file>` before committing.
 - Header guards: `#pragma once` (modern and supported everywhere).
-- Namespace: `cvknxd` (CometVisu KNX Daemon).
+- Namespace: `cvknx` (CometVisu KNX Backend).
 
 ## Copyright Header
 
@@ -90,11 +91,13 @@ actual file content (e.g., `#pragma once` or `#include`).
 | Directory        | Purpose                                      |
 |------------------|----------------------------------------------|
 | `src/`           | Production source code                       |
+| `src/bus/`       | Transport seam: `BusLink`, `BusConfig`, `BusFactory`, shared TX link |
+| `src/knxnetip/`  | cEMI codec, KNXnet/IP framing, routing/tunnelling links, discovery |
 | `src/fcgi/`      | FastCGI protocol implementation              |
 | `src/router/`    | URL routing and handler dispatch             |
 | `src/handlers/`  | `/l`, `/r`, `/w` endpoint handlers           |
 | `src/knxd/`      | knxd Unix socket client and eibd protocol    |
-| `src/state/`     | Session store, shared & local group caches    |
+| `src/state/`     | Session store, shared & local group caches, shared TX queue |
 | `src/util/`      | Query string parser, JSON builder, hex utils |
 | `tests/unit/`    | Unit tests (mocked dependencies)             |
 | `tests/integration/` | Integration tests (real or fake socket)  |
@@ -109,10 +112,9 @@ actual file content (e.g., `#pragma once` or `#include`).
    This is critical because long-poll `/r` requests block for up to 300
    seconds — without multiple workers, one long-poll would block all other
    clients. Worker count is configurable via `FCGI_WORKERS` (default: 20).
-   Each worker opens its own knxd connection.
-   All shared state (KnxdClient, SessionStore) is protected by
-   `std::mutex`/`std::recursive_mutex` for thread-safe access within each
-   process.
+   Workers never open a bus connection of their own (see decision 2).
+   All shared state (SharedGroupCache, SharedTxQueue, SessionStore) is
+   protected by process-shared mutexes for safe access across processes.
    **The parent supervises the pool and is the only process that reaps
    children** (no SIGCHLD handler that calls `waitpid()` — it would steal the
    exit statuses).  Dead workers and a dead cache reader are restarted with a
@@ -123,19 +125,42 @@ actual file content (e.g., `#pragma once` or `#include`).
    `clone3`/`clone` with process-sharing flags (CLONE_VM, CLONE_THREAD) is
    blocked, preventing `std::thread` creation.
 
-2. **Knxd connections**:
-   - **Cache reader process**: A single dedicated child process opens a
-     read-write group socket to knxd.  It continuously drains group telegrams
-     (APDU_PACKET and GROUP_PACKET) and pushes them into the shared cache.
-   - **Worker processes**: Each worker opens a **write-only** group socket
-     (`open_group_socket(true)`) to knxd.  Workers only send group telegrams
-     (via `/w` handler) — all group telegram reception goes through the cache
-     reader.  This ensures only one knxd connection reads from the bus,
-     eliminating duplicate processing and per-worker position divergence.
-   - **Handshake deadline**: every `EIB_OPEN_GROUPCON` reply is read with a
-     deadline (`KnxdClient::set_handshake_timeout_ms()`, default 5 s).  A knxd
-     that accepts the connection but never answers must not block the caller —
-     that used to hang `/w` requests forever.
+2. **Transports and the single bus owner**: `KNX_TRANSPORT` is **required**
+   (`knxd`, `ip-tunnel`, `ip-routing`); there is no default, so a wrong `ip-*`
+   setup can never be mistaken for a knxd outage.  Handlers, router and cache
+   only ever see the `BusLink` interface (`src/bus/bus_link.h`); the
+   `BusFactory` is the only place that knows the implementations.  Never add
+   an `if (transport == ...)` outside `main.cpp` / `BusFactory`.
+   - **Exactly one process owns the bus connection** — the cache reader — for
+     RX *and* TX of every transport.  Workers only push into the shared TX
+     queue (`SharedTxQueue`, mmap ring + inherited `eventfd`) via
+     `SharedTxBusLink`.  `FCGI_WORKERS` therefore multiplies neither knxd
+     client slots (one instead of `FCGI_WORKERS + 1`) nor KNXnet/IP tunnels
+     (one instead of one per worker).
+   - **knxd** (`KnxdClient`): one read-write group socket, opened by the cache
+     reader.  Every `EIB_OPEN_GROUPCON` reply is read with a deadline
+     (`set_handshake_timeout_ms()`, default 5 s) — a knxd that accepts the
+     connection but never answers must not block the caller.
+   - **ip-routing** (`RoutingBusLink`): one UDP socket, joined to
+     `KNX_IP_MULTICAST`, TTL 16, loop enabled.  Stateless: no ACKs, no
+     heartbeat.  Own echoes come back as `L_Data.req` and are dropped by the
+     cEMI codec.
+   - **ip-tunnel** (`TunnelingBusLink`): CONNECT / CONNECTIONSTATE /
+     DISCONNECT, one sequence counter, every inbound request ACKed,
+     out-of-sequence frames ACKed **and discarded** (a duplicate toggle would
+     switch twice), retransmission with the *same* sequence on a missing ACK,
+     heartbeat every `KNX_IP_HEARTBEAT_SEC` (devices drop a tunnel after 120 s
+     of silence).
+   - **cEMI trap**: only `L_Data.ind` (0x29) reaches the cache.  `L_Data.con`
+     (0x2E) confirms *our own* write and must be dropped, otherwise every
+     write is delivered twice.
+   - **Outage key**: `/r` and `/w` report `"knxd": {...}` for the knxd
+     transport and `"bus": {...}` for the KNXnet/IP transports — same inner
+     shape, key from `BusConfig::outage_key()`.
+   - **TX queue semantics**: a telegram that cannot be sent stays queued (a
+     write is never lost silently), but a write is **rejected** while the bus
+     is unavailable — `SharedTxBusLink` returns `false`, `/w` answers `503`
+     instead of pretending success.
 
 3. **Shared-memory group cache (`SharedGroupCache`)**: A fixed-size
    open-addressing hash table (2048 entries) in `mmap(MAP_SHARED|MAP_ANONYMOUS)`
@@ -199,31 +224,35 @@ actual file content (e.g., `#pragma once` or `#include`).
    `FCGI_PARAMS`. We parse the query string ourselves with `QueryString`.
 
 8. **Cache reader process**: A dedicated child process (forked before the
-   worker pool) that owns the single knxd group socket connection.  It runs
-   a `poll()`-based loop: wait for activity on the knxd fd, drain all pending
-   group telegrams, parse APDU data, and push value data to the shared cache.
-   Each push increments the shared position counter and broadcasts the
-   condition variable to wake blocked long-poll readers.
+   worker pool) that owns the single bus connection (`BusLink`) for RX *and*
+   TX.  It runs a `poll()`-based loop over `{link_fd, tx_eventfd}`: drain the
+   shared TX queue first, then drain all pending group telegrams, parse APDU
+   data, and push value data to the shared cache.  Each push increments the
+   shared position counter and broadcasts the condition variable to wake
+   blocked long-poll readers.
    The loop lives in `run_cache_reader()` (`src/knxd/cache_reader.{h,cpp}`, unit
-   tested via `MockKnxdClient`) and is resilient by design: knxd may be absent at
-   startup or restart at any time (`Link down, terminating`), so every failure
-   path reconnects forever with an exponential backoff (500 ms … 30 s) and an
-   interruptible sleep.  It must never busy-loop — a spin here burns a full CPU
-   core on an embedded system, which is exactly the bug this design prevents.
-   `wait_for_activity()` therefore distinguishes `Timeout` (no data, connection
-   fine) from `Error` (POLLHUP/POLLERR/POLLNVAL or not connected).
+   tested via `MockBusLink`) and is resilient by design: the bus may be absent
+   at startup or restart at any time (`Link down, terminating`), so every
+   failure path reconnects forever with an exponential backoff (500 ms … 30 s)
+   and an interruptible sleep.  It must never busy-loop — a spin here burns a
+   full CPU core on an embedded system, which is exactly the bug this design
+   prevents.  `wait_for_activity()` therefore distinguishes `Timeout` (no data,
+   connection fine) from `Error` (POLLHUP/POLLERR/POLLNVAL or not connected),
+   and the eventfd is always consumed before draining so it cannot stay
+   readable forever.
 
-9. **knxd availability is reported to the client**: the cache reader publishes
+9. **Bus availability is reported to the client**: the cache reader publishes
    its connection state into the shared memory region
-   (`SharedGroupCache::publish_knxd_status()`, read back with `knxd_status()`):
+   (`SharedGroupCache::publish_bus_status()`, read back with `bus_status()`):
    `available`, `last_ok` (Unix time of the last successful connection) and
    `down_since` (Unix time the current outage started, 0 while connected).
    Every retry keeps the first `down_since` of the current outage.  The state
    starts as "available" — until the reader reports otherwise no read may be
    rejected.
    Whenever the connection is down, `/r` and `/w` append
-   `"knxd":{"ok":false,"since":<ts>,"lastOk":<ts>}` via
-   `add_knxd_outage()` (`src/handlers/knxd_status_json.{h,cpp}`); the field is
+   `"knxd":{"ok":false,"since":<ts>,"lastOk":<ts>}` (key `"bus"` for the
+   KNXnet/IP transports) via
+   `add_bus_outage()` (`src/handlers/knxd_status_json.{h,cpp}`); the field is
    absent while knxd is reachable, so the normal case costs no bytes.  `/r`
    answers **`503`** (a read is not successful while the bus is unreachable) and
    skips the long-poll wait — nothing can arrive, so waiting would only delay

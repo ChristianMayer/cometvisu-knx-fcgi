@@ -13,26 +13,34 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file mock_bus_link.h
+ * @brief Scriptable BusLink for unit and integration tests.
+ */
+
 #pragma once
 
 #include <cstdint>
 #include <queue>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
-#include "../src/knxd/knxd_client.h"
+#include "../src/bus/bus_link.h"
 
-namespace cvknxd {
+namespace cvknx {
 
-class MockKnxdClient : public KnxdClientInterface {
+class MockBusLink : public BusLink {
 public:
-  MockKnxdClient() = default;
+  MockBusLink() = default;
 
-  [[nodiscard]] bool connect(std::string_view socket_path) override;
+  [[nodiscard]] bool connect() override {
+    return connect(std::string_view{"/run/knx"}) && open_group_socket(false);
+  }
+  [[nodiscard]] bool connect(std::string_view socket_path);
   void disconnect() override;
-  [[nodiscard]] bool reconnect() override;
   [[nodiscard]] bool is_connected() const override;
-  [[nodiscard]] bool open_group_socket(bool write_only) override;
   [[nodiscard]] bool send_group_packet(uint16_t group_addr,
                                        const std::vector<uint8_t>& apdu) override;
   [[nodiscard]] bool poll_group_telegram(uint16_t& out_group_addr,
@@ -41,6 +49,12 @@ public:
   [[nodiscard]] uint64_t get_telegram_count() const override;
   void set_nonblocking(bool enable) override;
   [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
+  [[nodiscard]] std::string label() const override { return "mock bus link"; }
+
+  /// Reconnect using the last-known target (test helper, not part of BusLink).
+  [[nodiscard]] bool reconnect();
+  /// Open the group socket (test helper, not part of BusLink).
+  [[nodiscard]] bool open_group_socket(bool write_only);
 
   // --- test helpers ---
   void set_connection_success(bool success) { connection_success_ = success; }
@@ -76,4 +90,4 @@ private:
   int send_fail_count_ = 0;
 };
 
-}  // namespace cvknxd
+}  // namespace cvknx

@@ -16,12 +16,12 @@
 #include <gtest/gtest.h>
 
 #include "handlers/write_handler.h"
-#include "mock_knxd_socket.h"
+#include "mock_bus_link.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/query_string.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 class WriteHandlerTest : public ::testing::Test {
 protected:
@@ -32,7 +32,7 @@ protected:
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  MockKnxdClient knxd_;
+  MockBusLink knxd_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   SessionStore sessions_;
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -266,8 +266,8 @@ TEST_F(WriteHandlerTest, SendFailureClearedOnSubsequentCalls) {
 // ================================================================
 
 TEST_F(WriteHandlerTest, FailedWriteReportsTheKnxdOutage) {
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1500);
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1500);
   knxd_.set_send_fail_count(1);
 
   WriteHandler handler(knxd_, sessions_, &cache_);
@@ -292,7 +292,7 @@ TEST_F(WriteHandlerTest, FailedWriteWithoutCacheStillReportsUnavailability) {
 }
 
 TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
-  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_bus_status(true, 1000);
 
   WriteHandler handler(knxd_, sessions_, &cache_);
   auto result = handler.handle("a=KNX:1/2/3&v=8042");

@@ -20,7 +20,7 @@
 
 #include "../src/util/debug_log.h"
 
-namespace cvknxd {
+namespace cvknx {
 namespace {
 
 // Helper: capture stderr by swapping the stream buffer.
@@ -302,4 +302,4 @@ TEST_F(DebugLogTest, InitFromEnvDisabledWhenFalse) {
 }
 
 }  // namespace
-}  // namespace cvknxd
+}  // namespace cvknx

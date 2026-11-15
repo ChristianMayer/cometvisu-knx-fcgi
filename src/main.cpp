@@ -53,14 +53,20 @@
 #include <string_view>
 #include <vector>
 
+#include "bus/bus_config.h"
+#include "bus/bus_connector.h"
+#include "bus/bus_factory.h"
+#include "bus/bus_link.h"
+#include "bus/knx_codec.h"
+#include "bus/shared_tx_bus_link.h"
 #include "fcgi/fcgi_server.h"
 #include "knxd/cache_reader.h"
-#include "knxd/knxd_client.h"
-#include "knxd/knxd_connector.h"
-#include "knxd/knxd_protocol.h"
+#include "knxnetip/discovery.h"
+#include "knxnetip/knxnetip_frame.h"
 #include "router/router.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
+#include "state/shared_tx_queue.h"
 #include "util/debug_log.h"
 #include "util/fork_safety.h"
 #include "version.h"
@@ -92,7 +98,7 @@ extern "C" void handle_sigterm(int /*signum*/) {
 /// Set resource limits for long-running embedded operation.
 /// Called once at startup (before fork) so all children inherit the limits.
 void set_resource_limits() {
-  struct rlimit rl{};
+  struct rlimit rl {};
 
   // Limit file descriptors to prevent exhaustion from slow leaks.
   rl.rlim_cur = kMaxFileDescriptors;
@@ -141,7 +147,7 @@ int parse_env_int(const char* name, int default_val, int min_val, int max_val) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  using namespace cvknxd;
+  using namespace cvknx;
 
   // Handle command-line flags when invoked directly (e.g., for version queries).
   // FastCGI binaries can be run from a terminal for introspection without
@@ -153,19 +159,57 @@ int main(int argc, char* argv[]) {
       std::cout << application_name() << " " << version() << "\n";
       return 0;
     }
+    if (arg == "--discover") {
+      // Diagnostics only: send a SEARCH_REQUEST and print every answer.
+      DiscoveryOptions discovery;
+      if (const char* group = std::getenv("KNX_IP_MULTICAST"); group != nullptr && *group != '\0') {
+        discovery.address = group;
+      }
+      if (const char* iface = std::getenv("KNX_IP_IFACE"); iface != nullptr && *iface != '\0') {
+        discovery.iface = iface;
+      }
+      const auto devices = discover_devices(discovery);
+      if (devices.empty()) {
+        std::cout << "No KNXnet/IP device answered on " << discovery.address << ":"
+                  << discovery.port << "\n";
+        return 1;
+      }
+      for (const auto& device : devices) {
+        std::cout << "KNXnet/IP device: " << (device.name.empty() ? "(unnamed)" : device.name)
+                  << "  individual=" << ((device.individual_address >> 12) & 0x0F) << "."
+                  << ((device.individual_address >> 8) & 0x0F) << "."
+                  << (device.individual_address & 0xFF)
+                  << "  endpoint=" << knxnetip::ipv4_to_string(device.address) << ":" << device.port
+                  << "  multicast=" << knxnetip::ipv4_to_string(device.multicast_address) << "\n";
+      }
+      return 0;
+    }
     if (arg == "--help" || arg == "-h") {
       std::cout
           << application_name() << " " << version() << "\n"
-          << "FastCGI backend bridging CometVisu Protocol to knxd\n"
+          << "FastCGI backend bridging CometVisu Protocol to the KNX bus\n"
+          << "(transports: knxd, ip-tunnel, ip-routing)\n"
           << "\n"
           << "Usage: cometvisu-knx-fcgi [OPTION]\n"
           << "\n"
           << "Options:\n"
           << "  --version, -v   Print version information and exit\n"
+          << "  --discover      Send a KNXnet/IP SEARCH_REQUEST and print the answers\n"
           << "  --help, -h      Print this help message and exit\n"
           << "\n"
           << "Environment variables:\n"
-          << "  KNXD_SOCKET           Path to the knxd Unix socket (default: /run/knx)\n"
+          << "  KNX_TRANSPORT         REQUIRED. knxd | ip-tunnel | ip-routing\n"
+          << "  KNXD_SOCKET           knxd: path to the knxd Unix socket (default: /run/knx)\n"
+          << "  KNX_IP_HOST           ip-tunnel: KNX interface/router address (required)\n"
+          << "  KNX_IP_PORT           KNXnet/IP UDP port (default: 3671)\n"
+          << "  KNX_IP_LOCAL_ADDR     ip-tunnel: local address advertised in the HPAI\n"
+          << "                        (unset = let the OS choose, NAT friendly)\n"
+          << "  KNX_IP_MULTICAST      ip-routing: multicast group (default: 224.0.23.12)\n"
+          << "  KNX_IP_IFACE          ip-routing: interface for join/send (default: any)\n"
+          << "  KNX_IP_NAT            ip-tunnel: 1 = NAT mode (default: 0)\n"
+          << "  KNX_IP_HEARTBEAT_SEC  ip-tunnel: heartbeat interval (default: 60)\n"
+          << "  KNX_IP_ACK_TIMEOUT_MS ip-tunnel: ACK timeout in ms (default: 1000)\n"
+          << "  KNX_IP_RETRIES        ip-tunnel: retransmissions (default: 3)\n"
           << "  FCGI_SOCKET           Direct FCGI socket (unset = spawn-fcgi mode)\n"
           << "  FCGI_WORKERS          Worker processes in direct socket mode (default: 20, "
              "max: 256)\n"
@@ -204,7 +248,7 @@ int main(int argc, char* argv[]) {
   // the default BSD semantics of signal() the supervisor's wait() is restarted
   // transparently after the handler returns, so the shutdown flag is never
   // seen and the parent keeps waiting forever.
-  struct sigaction shutdown_action{};
+  struct sigaction shutdown_action {};
   shutdown_action.sa_handler = handle_sigterm;
   ::sigemptyset(&shutdown_action.sa_mask);
   shutdown_action.sa_flags = 0;
@@ -226,7 +270,18 @@ int main(int argc, char* argv[]) {
   //   - The knxd socket is a local Unix socket — redirection only affects the local machine.
   //   - An attacker who can manipulate the web server's environment already has
   //     sufficient access to compromise the system directly.
-  const char* knxd_socket = get_env_default("KNXD_SOCKET", "/run/knx");
+  // ---- Bus transport configuration ----
+  // KNX_TRANSPORT is mandatory: the three transports are equally supported and
+  // there is no silent default (a wrong `ip-*` setup must not look like a knxd
+  // outage).  Every other value is validated, never replaced by a default.
+  std::string bus_config_error;
+  const auto bus_config_opt = BusConfig::from_env(bus_config_error);
+  if (!bus_config_opt) {
+    std::cerr << "[ERROR] " << bus_config_error << "\n";
+    return 1;
+  }
+  const BusConfig bus_config = *bus_config_opt;
+
   int longpoll_timeout = parse_env_int("LONGPOLL_TIMEOUT_SEC", 300, 1, kMaxLongpollTimeoutSec);
   int num_workers = parse_env_int("FCGI_WORKERS", 20, 1, 256);
 
@@ -249,7 +304,9 @@ int main(int argc, char* argv[]) {
   // ---- Startup info ----
   std::cout << "[INFO] cometvisu-knx-fcgi " << version() << " starting\n";
   std::cout << "[INFO] Configuration:\n";
-  std::cout << "[INFO]   KNXD_SOCKET           " << knxd_socket << "\n";
+  std::cout << "[INFO]   KNX_TRANSPORT        " << bus_transport_to_string(bus_config.transport)
+            << "\n";
+  std::cout << "[INFO]   BUS                  " << bus_config.describe() << "\n";
   std::cout << "[INFO]   FCGI_SOCKET           "
             << (*fcgi_socket != '\0' ? fcgi_socket : "(not set, spawn-fcgi mode)") << "\n";
   std::cout << "[INFO]   FCGI_WORKERS          " << num_workers << "\n";
@@ -292,33 +349,50 @@ int main(int argc, char* argv[]) {
   std::cout << "[INFO] Shared group cache created (" << SharedGroupCache::region_size()
             << " bytes, capacity=" << kSharedCacheCapacity << ")\n";
 
-  // ---- Verify the knxd connection (best effort) ----
-  // The daemon MUST start even when knxd is unavailable: knxd can die at any
-  // time ("Link down, terminating") and is often restarted by a supervisor.
-  // The cache reader and the workers reconnect on demand, so a failed check is
-  // only a warning — never a reason to refuse to serve HTTP.
-  KnxdClient knxd_parent;
-  if (connect_knxd_with_retry(knxd_parent, knxd_socket, false)) {
-    if (knxd_parent.open_group_socket(false)) {
-      knxd_parent.set_nonblocking(true);
-      std::cout << "[INFO] knxd connection verified at " << knxd_socket << "\n";
-    } else {
-      std::cerr << "[WARN] knxd at " << knxd_socket
-                << " does not accept a group socket — continuing, retrying in the background\n";
+  // ---- Shared TX queue (created before any fork) ----
+  // Workers enqueue here; the cache reader is the only process that talks to
+  // the bus.  The eventfd is inherited by every child, so a worker's write()
+  // wakes the reader's poll() with zero polling latency.
+  SharedTxQueue tx_queue;
+  if (!tx_queue.create()) {
+    std::cerr << "[ERROR] Failed to create shared TX queue: " << std::strerror(errno) << "\n";
+    return 1;
+  }
+  std::cout << "[INFO] Shared TX queue created (" << SharedTxQueue::region_size()
+            << " bytes, capacity=" << kTxQueueCapacity << ")\n";
+
+  // ---- Verify the bus connection (best effort) ----
+  // The daemon MUST start even when the bus is unavailable: knxd can die at any
+  // time ("Link down, terminating") and a KNX interface may be rebooting.  The
+  // cache reader reconnects on its own, so a failed probe is only a warning —
+  // never a reason to refuse to serve HTTP.
+  {
+    auto probe = create_bus_link(bus_config);
+    if (!probe) {
+      return 1;
     }
-    knxd_parent.disconnect();
-  } else {
-    std::cerr << "[WARN] knxd not reachable at " << knxd_socket
-              << " — starting anyway and retrying in the background\n";
+    // Short, bounded retries: startup must not wait for a long backoff, the
+    // cache reader retries forever in the background anyway.
+    constexpr int kProbeDelaysMs[] = {100, 200, 400};
+    if (connect_bus_with_retry(*probe, false, kProbeDelaysMs)) {
+      std::cout << "[INFO] Bus connection verified: " << probe->label() << "\n";
+      probe->disconnect();
+    } else {
+      std::cerr << "[WARN] " << probe->label()
+                << " not reachable — starting anyway and retrying in the background\n";
+      probe->disconnect();
+    }
   }
 
   SessionStore sessions;
 
   // ---- Create router (will be used by worker processes) ----
-  // The knxd reference is for writes only — workers reconnect it as write-only.
-  KnxdClient knxd_writer;
-  Router router(knxd_writer, shared_cache, sessions, longpoll_timeout,
-                base_url != nullptr ? base_url : "");
+  // Workers only enqueue: the cache reader owns the single bus connection for
+  // RX and TX, so `FCGI_WORKERS` never multiplies knxd client slots or
+  // KNXnet/IP tunnels.
+  SharedTxBusLink worker_link(tx_queue, shared_cache);
+  Router router(worker_link, shared_cache, sessions, longpoll_timeout,
+                base_url != nullptr ? base_url : "", std::string(bus_config.outage_key()));
 
   // Register the request handler on the FCGI server
   server.set_handler([&](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });
@@ -412,24 +486,27 @@ int main(int argc, char* argv[]) {
           server.close_listen_socket();
         }
 
-        // The reader owns its own knxd connection and reconnects forever:
-        // knxd may be missing at startup or restart at any time, and the loop
+        // The reader owns the only bus connection and reconnects forever: the
+        // bus may be missing at startup or restart at any time, and the loop
         // must wait for it without burning CPU.  SIGTERM (PR_SET_PDEATHSIG
         // above) terminates the reader; the stop predicate keeps the loop
         // stoppable and testable.
-        KnxdClient reader_knxd;
-        std::cout << "[INFO] Cache reader started, pid=" << ::getpid() << "\n";
+        auto reader_link = create_bus_link(bus_config);
+        if (!reader_link) {
+          std::_Exit(1);
+        }
+        std::cout << "[INFO] Cache reader started, pid=" << ::getpid() << " ("
+                  << reader_link->label() << ")\n";
         std::cout << std::flush;
 
         CacheReaderOptions reader_options;
-        reader_options.socket_path = knxd_socket;
 
-        run_cache_reader(reader_knxd, shared_cache, reader_options,
+        run_cache_reader(*reader_link, shared_cache, &tx_queue, reader_options,
                          [] { return g_shutdown_requested != 0; });
 
         std::cout << "[INFO] Cache reader shutting down\n";
         std::cout << std::flush;
-        reader_knxd.disconnect();
+        reader_link->disconnect();
         std::_Exit(0);
       }
       return pid;
@@ -448,38 +525,23 @@ int main(int argc, char* argv[]) {
         ::prctl(PR_SET_PDEATHSIG, SIGTERM);
         (void)::signal(SIGTERM, SIG_DFL);
 
-        // Workers use write-only group sockets — the cache reader handles all
-        // group telegram reception.
-        //
-        // A missing knxd must not keep the worker from serving HTTP and must
+        // A missing bus must not keep the worker from serving HTTP and must
         // not delay its readiness: try once, warn on failure, and let
-        // send_group_packet() reconnect on demand (connect() remembers the
-        // socket path even when the attempt failed).
+        // send_group_packet() reconnect on demand.
         //
         // Emitted as one line each: starting workers log concurrently to the
         // same stderr and must not interleave fragments.
-        if (!knxd_writer.connect(knxd_socket)) {
+        if (!worker_link.connect()) {
           std::cerr << "[WARN] Worker pid=" + std::to_string(::getpid()) + " (worker " +
-                           std::to_string(index) + "): knxd not reachable at " + knxd_socket +
+                           std::to_string(index) + "): cannot connect to " + worker_link.label() +
                            " — continuing, will retry on demand\n";
-        } else if (!knxd_writer.open_group_socket(true)) {
-          // Not fatal: the group socket is opened again on the next write.  It
-          // does indicate a configuration problem — knxd provides one
-          // connection per client address, while the pool needs
-          // FCGI_WORKERS + 1 (workers plus the cache reader).
-          std::cerr << "[WARN] Worker pid=" + std::to_string(::getpid()) + " (worker " +
-                           std::to_string(index) + "): cannot open group socket on knxd at " +
-                           knxd_socket +
-                           " — continuing, will retry on demand (FCGI_WORKERS + 1 knxd client "
-                           "slots required: one per worker plus one for the cache reader)\n";
-          knxd_writer.disconnect();
         }
 
         std::cout << "[INFO] Worker " << index << " ready, pid=" << ::getpid() << "\n";
         std::cout << std::flush;
 
         const int child_result = server.run();
-        knxd_writer.disconnect();
+        worker_link.disconnect();
         std::_Exit(child_result);
       }
       return pid;

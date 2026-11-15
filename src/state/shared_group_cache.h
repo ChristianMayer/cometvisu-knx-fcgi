@@ -32,8 +32,7 @@
  * no heap allocation) so it can live entirely in the mmap'd region.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_SHARED_GROUP_CACHE_H_
-#define COMETVISU_KNXD_FCGI_SHARED_GROUP_CACHE_H_
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -43,7 +42,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace cvknxd {
+namespace cvknx {
 
 /// Maximum number of cache entries (open-addressing hash table).
 inline constexpr size_t kSharedCacheCapacity = 2048;
@@ -163,7 +162,7 @@ public:
   [[nodiscard]] SharedCacheData* data() { return data_; }
 
   /// knxd availability as published by the cache reader process.
-  struct KnxdStatus {
+  struct BusStatus {
     bool available = true;    ///< cache reader holds a knxd connection (false once reported)
     uint32_t last_ok = 0;     ///< Unix time (s) of the last successful connection, 0 = never
     uint32_t down_since = 0;  ///< Unix time (s) the connection broke, 0 = connected
@@ -172,13 +171,13 @@ public:
   /// Publish the cache reader's knxd connection state.  Called by the cache
   /// reader process only.  Every failure keeps the timestamp of the first
   /// failure of the current outage, so clients can report "down since X".
-  void publish_knxd_status(bool available);
+  void publish_bus_status(bool available);
 
   /// Same, with an explicit timestamp (deterministic tests).
-  void publish_knxd_status(bool available, uint32_t now);
+  void publish_bus_status(bool available, uint32_t now);
 
   /// Read the published knxd state (lock-free).
-  [[nodiscard]] KnxdStatus knxd_status() const;
+  [[nodiscard]] BusStatus bus_status() const;
 
   /// Size of the shared memory region in bytes.
   [[nodiscard]] static size_t region_size() { return sizeof(SharedCacheData); }
@@ -195,6 +194,4 @@ private:
   void insert_locked(uint16_t addr, const SharedCacheEntry& entry);
 };
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_SHARED_GROUP_CACHE_H_
+}  // namespace cvknx

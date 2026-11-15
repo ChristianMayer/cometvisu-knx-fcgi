@@ -23,8 +23,7 @@
  * no duplicate delivery and no stale re-transmission of unchanged GAs.
  */
 
-#ifndef COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
-#define COMETVISU_KNXD_FCGI_GROUP_CACHE_H_
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -35,7 +34,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace cvknxd {
+namespace cvknx {
 
 /// Position modulus — keeps the index `i` bounded.  Must match the value in
 /// shared_group_cache.h.  See that file for the rationale.
@@ -81,5 +80,4 @@ private:
   std::atomic<uint32_t> position_{0};
 };
 
-}  // namespace cvknxd
-#endif
+}  // namespace cvknx

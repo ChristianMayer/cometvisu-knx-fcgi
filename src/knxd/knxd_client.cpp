@@ -43,7 +43,7 @@
 #include "../util/hex.h"
 #include "knxd_protocol.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 // ---- Internal state (PIMPL) ----
 
@@ -88,7 +88,7 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
         continue;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd = fd;
         pfd.events = POLLOUT;
         if (::poll(&pfd, 1, 5000) <= 0) {
@@ -189,7 +189,7 @@ std::optional<std::vector<uint8_t>> read_message_deadline(int fd, std::vector<ui
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
     const int poll_ms = static_cast<int>(std::max<int64_t>(1, remaining_ms));
 
-    struct pollfd pfd{};
+    struct pollfd pfd {};
     pfd.fd = fd;
     pfd.events = POLLIN;
     const int ready = ::poll(&pfd, 1, poll_ms);
@@ -218,7 +218,9 @@ std::optional<std::vector<uint8_t>> read_message_deadline(int fd, std::vector<ui
 
 // ---- Public API ----
 
-KnxdClient::KnxdClient() : impl_(std::make_unique<Impl>()) {}
+KnxdClient::KnxdClient(std::string socket_path) : impl_(std::make_unique<Impl>()) {
+  impl_->socket_path_ = std::move(socket_path);
+}
 KnxdClient::~KnxdClient() = default;
 KnxdClient::KnxdClient(KnxdClient&& other) noexcept : impl_(std::move(other.impl_)) {}
 KnxdClient& KnxdClient::operator=(KnxdClient&& other) noexcept {
@@ -240,7 +242,7 @@ bool KnxdClient::connect(std::string_view socket_path) {
     return false;
   }
 
-  struct sockaddr_un addr{};
+  struct sockaddr_un addr {};
   std::memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
   if (socket_path.size() >= sizeof(addr.sun_path)) {
@@ -267,7 +269,7 @@ bool KnxdClient::connect(std::string_view socket_path) {
   }
 
   if (ret < 0) {
-    struct pollfd pfd{};
+    struct pollfd pfd {};
     pfd.fd = impl_->fd;
     pfd.events = POLLOUT;
     if (::poll(&pfd, 1, 5000) <= 0) {
@@ -327,6 +329,27 @@ bool KnxdClient::reconnect() {
   }
   set_nonblocking(true);
   return true;
+}
+
+bool KnxdClient::connect() {
+  if (impl_->socket_path_.empty()) {
+    return false;
+  }
+  // A usable knxd link is the socket plus an accepted group socket handshake;
+  // without it no telegram would ever be delivered.
+  if (!connect(std::string_view{impl_->socket_path_})) {
+    return false;
+  }
+  if (!open_group_socket(false)) {
+    disconnect();
+    return false;
+  }
+  return true;
+}
+
+std::string KnxdClient::label() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+  return "knxd at " + impl_->socket_path_;
 }
 
 bool KnxdClient::open_group_socket(bool write_only) {
@@ -415,7 +438,7 @@ bool KnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8
   auto msg = read_message(impl_->fd, impl_->read_buffer_);
   if (!msg) {
     // Check if the connection died (POLLHUP) — reconnect and retry once.
-    struct pollfd pfd{};
+    struct pollfd pfd {};
     pfd.fd = impl_->fd;
     // NOLINTNEXTLINE(readability-implicit-bool-conversion)
     if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0) {
@@ -505,7 +528,7 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
     return WaitResult::Error;
   }
 
-  struct pollfd pfd{};
+  struct pollfd pfd {};
   pfd.fd = fd;
   pfd.events = POLLIN;
   const int ret = ::poll(&pfd, 1, timeout_ms);
@@ -525,4 +548,4 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
   return ((pfd.revents & POLLIN) != 0) ? WaitResult::GroupData : WaitResult::Timeout;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

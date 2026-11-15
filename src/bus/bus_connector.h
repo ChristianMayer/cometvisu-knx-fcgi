@@ -14,26 +14,21 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
- * @file knxd_connector.h
- * @brief knxd connection helper with exponential backoff retry.
+ * @file bus_connector.h
+ * @brief Bounded connect-with-retry helper for any BusLink.
  *
- * Provides connect_knxd_with_retry() which is used both at initial startup
- * and in worker children.  The retry strategy differs:
- *   - First-time connection: 4 attempts (500ms, 1s, 2s delays).
- *   - Known-working reconnection: 6 attempts (adds 4s, 8s delays).
- *
- * Workers use extended retry because the parent already connected
- * successfully, so knxd is known to be reachable — longer delays give knxd
- * more time to recover from a temporary restart.
+ * The long-running retry loop lives in run_cache_reader(); this helper is for
+ * the one-off startup probe, where a few short attempts give a useful log line
+ * without delaying the FCGI listener.
  */
 
 #pragma once
 
-#include "knxd_client.h"
+#include "bus/bus_link.h"
 
-namespace cvknxd {
+namespace cvknx {
 
-/// Connect to knxd with exponential backoff retry.
+/// Connect to the bus with exponential backoff retry.
 /// Attempts to connect immediately, then retries on failure with increasing delays.
 ///
 /// Standard retry (has_worked_before=false):
@@ -43,16 +38,14 @@ namespace cvknxd {
 ///   try -> wait 500ms -> try -> wait 1s -> try -> wait 2s -> try
 ///   -> wait 4s -> try -> wait 8s -> try  (6 attempts total)
 ///
-/// @param knxd The knxd client interface to connect through.
-/// @param socket_path Path to the knxd Unix socket.
+/// @param link The bus link to connect.
 /// @param has_worked_before If true, use extended retry delays (up to 8s).
 /// @param custom_delays_ms Optional array of retry delays in milliseconds.
 ///        When nullptr (default), uses built-in defaults:
 ///        {500, 1000, 2000, 4000, 8000}.
 ///        Must have at least 5 elements when provided.
 /// @return true if connection succeeded.
-[[nodiscard]] bool connect_knxd_with_retry(KnxdClientInterface& knxd, const char* socket_path,
-                                           bool has_worked_before,
-                                           const int* custom_delays_ms = nullptr);
+[[nodiscard]] bool connect_bus_with_retry(BusLink& link, bool has_worked_before,
+                                          const int* custom_delays_ms = nullptr);
 
-}  // namespace cvknxd
+}  // namespace cvknx

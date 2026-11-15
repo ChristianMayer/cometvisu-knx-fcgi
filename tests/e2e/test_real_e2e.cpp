@@ -29,7 +29,7 @@
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 /// Real E2E tests against a running knxd instance.
 ///

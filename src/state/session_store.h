@@ -32,7 +32,7 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace cvknxd {
+namespace cvknx {
 
 /**
  * @brief Stores active CometVisu sessions with their metadata.
@@ -87,4 +87,4 @@ private:
   [[nodiscard]] static std::string generate_id();
 };
 
-}  // namespace cvknxd
+}  // namespace cvknx

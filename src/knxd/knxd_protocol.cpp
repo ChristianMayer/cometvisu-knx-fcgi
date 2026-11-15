@@ -31,7 +31,7 @@
 
 #include <cstring>
 
-namespace cvknxd {
+namespace cvknx {
 
 // ---- KnxGroupAddress ----
 
@@ -232,7 +232,10 @@ std::optional<std::vector<uint8_t>> try_extract_message(std::vector<uint8_t>& bu
 }
 
 // ---- Type-specific message builders ----
+// These are the only parts that depend on knxd's <eibtypes.h> constants, so
+// they disappear when the knxd transport is not built (KNXnet/IP needs none).
 
+#ifdef KNX_WITH_KNXD_TRANSPORT
 std::vector<uint8_t> build_open_groupcon(bool write_only) {
   // knxd >= 0.14 expects a 5-byte payload for all EIB_OPEN_* types:
   // [type:2][reserved/addr:2][write_only:1]
@@ -250,5 +253,6 @@ std::vector<uint8_t> build_group_packet(uint16_t group_addr, const std::vector<u
   data.insert(data.end(), apdu.begin(), apdu.end());
   return build_eibd_message(EIB_GROUP_PACKET, data);
 }
+#endif  // KNX_WITH_KNXD_TRANSPORT
 
-}  // namespace cvknxd
+}  // namespace cvknx

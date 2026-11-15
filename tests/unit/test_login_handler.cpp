@@ -22,7 +22,7 @@
 #include "state/session_store.h"
 #include "version.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 namespace {
 

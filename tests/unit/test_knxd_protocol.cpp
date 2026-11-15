@@ -17,7 +17,7 @@
 
 #include "knxd/knxd_protocol.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 // ---- Helpers for extracting bytes from knxd constants at compile time ----
 // These avoid hard-coding knxd message type values (like 0x0026) in tests.

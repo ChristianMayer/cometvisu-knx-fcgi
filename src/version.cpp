@@ -20,7 +20,7 @@
 
 #include "version.h"
 
-namespace cvknxd {
+namespace cvknx {
 
 std::string_view version() {
 #ifdef APP_VERSION
@@ -58,4 +58,4 @@ std::string_view knxd_build_git_hash() {
 #endif
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

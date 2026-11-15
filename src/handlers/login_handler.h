@@ -25,13 +25,12 @@
  *   - Session TTL and max-session enforcement
  */
 
-#ifndef COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_
-#define COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_
+#pragma once
 
 #include <string>
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
 class SessionStore;
 
@@ -69,6 +68,4 @@ private:
   const std::string base_url_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
 };
 
-}  // namespace cvknxd
-
-#endif  // COMETVISU_KNXD_FCGI_LOGIN_HANDLER_H_
+}  // namespace cvknx

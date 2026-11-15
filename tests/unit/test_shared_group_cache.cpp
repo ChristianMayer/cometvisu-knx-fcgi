@@ -19,7 +19,7 @@
 
 #include "state/shared_group_cache.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 class SharedGroupCacheTest : public ::testing::Test {
 public:
@@ -483,48 +483,48 @@ TEST_F(SharedGroupCacheTest, GetDeltaWithAgeZeroRejectsAll) {
 // knxd availability (published by the cache reader process)
 // ================================================================
 
-TEST_F(SharedGroupCacheTest, KnxdStatusIsAssumedAvailableUntilReported) {
+TEST_F(SharedGroupCacheTest, BusStatusIsAssumedAvailableUntilReported) {
   // Before the cache reader reports anything we must not reject reads.
-  const auto status = cache_.knxd_status();
+  const auto status = cache_.bus_status();
   EXPECT_TRUE(status.available);
   EXPECT_EQ(status.last_ok, 0U);
   EXPECT_EQ(status.down_since, 0U);
 }
 
 TEST_F(SharedGroupCacheTest, ConnectedKnxdReportsLastOk) {
-  cache_.publish_knxd_status(true, 1000);
+  cache_.publish_bus_status(true, 1000);
 
-  const auto status = cache_.knxd_status();
+  const auto status = cache_.bus_status();
   EXPECT_TRUE(status.available);
   EXPECT_EQ(status.last_ok, 1000U);
   EXPECT_EQ(status.down_since, 0U);
 }
 
 TEST_F(SharedGroupCacheTest, LosingTheConnectionRecordsTheOutageStart) {
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1010);
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1010);
 
-  const auto status = cache_.knxd_status();
+  const auto status = cache_.bus_status();
   EXPECT_FALSE(status.available);
   EXPECT_EQ(status.last_ok, 1000U);     // when it last worked
   EXPECT_EQ(status.down_since, 1010U);  // when it broke
 }
 
 TEST_F(SharedGroupCacheTest, RepeatedFailuresKeepTheFirstOutageTimestamp) {
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1010);
-  cache_.publish_knxd_status(false, 1999);  // still down after a retry
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1010);
+  cache_.publish_bus_status(false, 1999);  // still down after a retry
 
-  EXPECT_EQ(cache_.knxd_status().down_since, 1010U)
+  EXPECT_EQ(cache_.bus_status().down_since, 1010U)
       << "the outage start must not move with every retry";
 }
 
 TEST_F(SharedGroupCacheTest, ReconnectingClearsTheOutage) {
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1010);
-  cache_.publish_knxd_status(true, 2000);
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1010);
+  cache_.publish_bus_status(true, 2000);
 
-  const auto status = cache_.knxd_status();
+  const auto status = cache_.bus_status();
   EXPECT_TRUE(status.available);
   EXPECT_EQ(status.last_ok, 2000U);
   EXPECT_EQ(status.down_since, 0U);

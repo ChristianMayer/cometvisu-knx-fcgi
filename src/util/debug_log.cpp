@@ -28,7 +28,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace cvknxd {
+namespace cvknx {
 
 bool DebugLog::enabled_ = false;
 size_t DebugLog::max_uri_length_ = 500;
@@ -131,4 +131,4 @@ void DebugLog::knxd_recv(std::string_view operation, std::string_view address,
   std::cerr << oss.str() << std::flush;
 }
 
-}  // namespace cvknxd
+}  // namespace cvknx

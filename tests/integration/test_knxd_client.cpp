@@ -16,15 +16,15 @@
 #include <gtest/gtest.h>
 
 #include "knxd/knxd_client.h"
-#include "mock_knxd_socket.h"
+#include "mock_bus_link.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 namespace {
 
 class KnxdClientTest : public ::testing::Test {
 protected:
-  MockKnxdClient client_;
+  MockBusLink client_;
 };
 
 TEST_F(KnxdClientTest, ConnectAndDisconnect) {
@@ -67,10 +67,10 @@ TEST_F(KnxdClientTest, WaitForActivity) {
   ASSERT_TRUE(client_.connect("/run/knx"));
   ASSERT_TRUE(client_.open_group_socket(false));
   // No telegrams enqueued -> Timeout
-  EXPECT_EQ(client_.wait_for_activity(10), KnxdClientInterface::WaitResult::Timeout);
+  EXPECT_EQ(client_.wait_for_activity(10), BusLink::WaitResult::Timeout);
   // Enqueue -> GroupData
   client_.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
-  EXPECT_EQ(client_.wait_for_activity(10), KnxdClientInterface::WaitResult::GroupData);
+  EXPECT_EQ(client_.wait_for_activity(10), BusLink::WaitResult::GroupData);
 }
 
 TEST_F(KnxdClientTest, Reconnect) {
@@ -123,7 +123,7 @@ TEST_F(KnxdClientTest, DisconnectClearsState) {
   EXPECT_FALSE(client_.poll_group_telegram(addr, apdu));
   // wait_for_activity must report the lost connection instead of a plain
   // timeout — otherwise the cache reader spins at 100% CPU.
-  EXPECT_EQ(client_.wait_for_activity(1), KnxdClientInterface::WaitResult::Error);
+  EXPECT_EQ(client_.wait_for_activity(1), BusLink::WaitResult::Error);
 }
 
 TEST_F(KnxdClientTest, ResetClearsState) {

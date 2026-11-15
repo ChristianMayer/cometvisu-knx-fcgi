@@ -17,7 +17,7 @@
 
 #include "state/session_store.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 TEST(SessionStoreTest, CreateAnonymousSession) {
   SessionStore store;

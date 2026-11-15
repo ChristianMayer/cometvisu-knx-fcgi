@@ -19,12 +19,12 @@
 #include "handlers/login_handler.h"
 #include "handlers/read_handler.h"
 #include "handlers/write_handler.h"
-#include "mock_knxd_socket.h"
+#include "mock_bus_link.h"
 #include "router/router.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 
-using namespace cvknxd;
+using namespace cvknx;
 
 /// End-to-end tests simulating full CometVisu protocol flows.
 class FullFlowTest : public ::testing::Test {
@@ -35,7 +35,7 @@ protected:
     (void)knxd_.open_group_socket(false);
   }
 
-  MockKnxdClient knxd_;     // NOLINT
+  MockBusLink knxd_;     // NOLINT
   SharedGroupCache cache_;  // NOLINT
   SessionStore sessions_;   // NOLINT
 };
@@ -177,8 +177,8 @@ TEST_F(FullFlowTest, KnxdCacheIsUsedForReads) {
 
 TEST_F(FullFlowTest, RouterForwardsTheWriteErrorBody) {
   Router router(knxd_, cache_, sessions_, 1, "");
-  cache_.publish_knxd_status(true, 1000);
-  cache_.publish_knxd_status(false, 1500);
+  cache_.publish_bus_status(true, 1000);
+  cache_.publish_bus_status(false, 1500);
   knxd_.set_send_fail_count(1);
 
   FcgiRequest request;

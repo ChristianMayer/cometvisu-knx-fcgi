@@ -32,7 +32,7 @@
 #include <ostream>
 #include <string_view>
 
-namespace cvknxd {
+namespace cvknx {
 
 /**
  * @brief Debug logging facility.
@@ -98,4 +98,4 @@ private:
   static bool write_truncated(std::ostream& os, std::string_view text, size_t max_len);
 };
 
-}  // namespace cvknxd
+}  // namespace cvknx
