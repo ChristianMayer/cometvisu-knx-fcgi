@@ -40,7 +40,9 @@ add_test(NAME test_fcgi_server_socket COMMAND test_fcgi_server_socket)
 add_executable(test_concurrent_clients
     test_concurrent_clients.cpp
 )
-target_link_libraries(test_concurrent_clients PRIVATE cvknx_fcgi cvknx_util GTest::gtest GTest::gtest_main ${FCGI_LIBRARY} pthread)
+target_link_libraries(test_concurrent_clients PRIVATE
+    cvknx_fcgi cvknx_util cvknx_router cvknx_transport cvknx_cache_reader cvknx_state
+    GTest::gtest GTest::gtest_main ${FCGI_LIBRARY} pthread)
 add_test(NAME test_concurrent_clients COMMAND test_concurrent_clients)
 
 if(KNX_BUILD_KNXD_TRANSPORT)
@@ -70,3 +72,16 @@ add_dependencies(test_worker_supervision cometvisu-knx-fcgi)
 target_link_libraries(test_worker_supervision PRIVATE GTest::gtest GTest::gtest_main)
 add_test(NAME test_worker_supervision COMMAND test_worker_supervision)
 endif()
+
+add_executable(test_tx_queue_multiprocess
+    test_tx_queue_multiprocess.cpp
+)
+target_link_libraries(test_tx_queue_multiprocess PRIVATE cvknx_state GTest::gtest GTest::gtest_main pthread)
+add_test(NAME test_tx_queue_multiprocess COMMAND test_tx_queue_multiprocess)
+
+add_executable(test_transport_recovery
+    test_transport_recovery.cpp
+)
+target_link_libraries(test_transport_recovery PRIVATE
+    cvknx_transport cvknx_cache_reader cvknx_state GTest::gtest GTest::gtest_main pthread)
+add_test(NAME test_transport_recovery COMMAND test_transport_recovery)

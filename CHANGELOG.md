@@ -66,6 +66,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_knxnetip_frame`, `test_cemi`, `test_knxnetip_routing`,
   `test_knxnetip_tunnel`, `test_discovery`.
 
+### Fixed
+
+- **The cache reader ignored a dead bus link when the shared TX queue was in
+  use.**  The loop polls the link fd itself, so a device that dropped the
+  tunnel (`CONNECTIONSTATE_RESPONSE` with status `0x04`) or a link that
+  reported itself disconnected was never reconnected — writes stayed queued
+  forever.  Every iteration now re-checks `BusLink::is_connected()`.
+  (Found by `test_transport_recovery`.)
+- **A permanently failing send could spin the cache reader at 100 % CPU.**
+  While a backlog exists the loop polls with a zero timeout; with a link that
+  keeps rejecting sends that became a busy loop.  A failed send now falls
+  through to a normal (sleeping) wait and the telegram stays queued.
+- **A failed send no longer consumes the telegram.**  The queue is peeked, and
+  the slot is only dropped after the bus link accepted the telegram — a write
+  is never lost silently.
+- **TX bursts no longer starve inbound traffic.**  At most 8 telegrams are sent
+  per batch, with a zero-timeout poll in between, so received telegrams are
+  processed during a write burst and `SIGTERM` is honoured between telegrams.
+
+### Tests
+
+- New multi-process and failure-mode suites: `test_tx_queue_multiprocess`
+  (forked producers, killed producers, robust-mutex recovery under load, full
+  queue, consumer restart), `test_cache_reader_backpressure` (slow bus, silent
+  bus, backlog across an outage, prompt shutdown, concurrent handlers),
+  `test_transport_recovery` (real tunnelling link + queue against a
+  rate-limited, silent and restarting router) and new FCGI-level cases in
+  `test_concurrent_clients` (concurrent writes across forked workers delivered
+  exactly once, writes during an outage rejected and not queued, long-polls not
+  delaying writes).  The tunnelling suite gained delayed-ACK retransmission,
+  stale-ACK, inbound-burst and RX/TX interleaving cases.
+
 ### Changed
 
 - **The project is renamed from `cometvisu-knxd-fcgi` to `cometvisu-knx-fcgi`.**

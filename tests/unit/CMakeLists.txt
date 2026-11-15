@@ -199,3 +199,11 @@ add_executable(test_transport_edge_cases
 )
 target_link_libraries(test_transport_edge_cases PRIVATE cvknx_transport GTest::gtest GTest::gtest_main)
 add_test(NAME test_transport_edge_cases COMMAND test_transport_edge_cases)
+
+add_executable(test_cache_reader_backpressure
+    test_cache_reader_backpressure.cpp
+)
+target_link_libraries(test_cache_reader_backpressure PRIVATE
+    cvknx_cache_reader cvknx_handlers cvknx_transport cvknx_state
+    GTest::gtest GTest::gtest_main pthread)
+add_test(NAME test_cache_reader_backpressure COMMAND test_cache_reader_backpressure)

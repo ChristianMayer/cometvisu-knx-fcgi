@@ -90,19 +90,38 @@ int drain_telegrams(BusLink& link, SharedGroupCache& cache) {
 
 namespace detail {
 
-/// Send every telegram waiting in the shared TX ring.
-/// Clears the eventfd first, so a push during draining re-arms it.
-/// @return number of telegrams handed to the bus without error.
-int drain_tx_queue(BusLink& link, SharedTxQueue& queue) {
-  queue.drain_notifications();
+/// Maximum telegrams sent per drain call.
+///
+/// A rate-limited bus (a slow tunnel, a congested knxd) would otherwise let a
+/// burst of writes block the loop for seconds: no inbound telegram would be
+/// read in that time and a SIGTERM would only be noticed after the whole
+/// backlog.  Eight telegrams per batch keeps both latencies bounded.
+inline constexpr int kMaxTxBatch = 8;
+
+/// Outcome of one drain batch.
+struct TxDrain {
   int sent = 0;
+  /// A send failed: the link is in trouble.  The caller must not spin — the
+  /// telegram stays queued and is retried after a normal wait.
+  bool failed = false;
+};
+
+/// Send waiting telegrams into the bus.
+/// Clears the eventfd first, so a push during draining re-arms it.
+/// @param stop_requested Checked between telegrams, so shutdown stays prompt.
+TxDrain drain_tx_queue(BusLink& link, SharedTxQueue& queue,
+                       const std::function<bool()>& stop_requested, int max_batch) {
+  queue.drain_notifications();
+  TxDrain result;
+  int& sent = result.sent;
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
-  while (queue.peek(addr, apdu)) {
+  while (sent < max_batch && !stop_requested() && queue.peek(addr, apdu)) {
     if (!link.send_group_packet(addr, apdu)) {
       // The link is gone.  The telegram stays queued and is sent after the
       // reconnect — a write must never be lost silently.
       std::cerr << "[WARN] Failed to send queued telegram to " << link.label() << "\n";
+      result.failed = true;
       break;
     }
     queue.pop_drop();
@@ -110,12 +129,18 @@ int drain_tx_queue(BusLink& link, SharedTxQueue& queue) {
     DebugLog::knxd_send("tx_queue", KnxGroupAddress::from_eibaddr(addr).to_string(),
                         hex_encode(apdu.data(), apdu.size()));
   }
-  return sent;
+  return result;
 }
 
 /// Wait for bus traffic, an outgoing telegram, or the timeout — one poll().
 /// Never busy-loops: the eventfd is consumed by drain_tx_queue().
 Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_ms) {
+  // A link can die while it is not being polled (a device dropped the tunnel,
+  // a router signalled an error): every iteration must notice that before
+  // blocking again, otherwise the reconnect never happens.
+  if (!link.is_connected()) {
+    return Activity::Error;
+  }
   if (tx_queue == nullptr || tx_queue->eventfd() < 0) {
     const auto result = link.wait_for_activity(timeout_ms);
     if (result == BusLink::WaitResult::GroupData) {
@@ -239,17 +264,36 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
     // Always before waiting: a telegram queued while we were busy must not
     // wait for the next poll slice.  Re-loop when something was sent so the
     // stop predicate and the queue are re-evaluated before blocking again.
-    if (tx_queue != nullptr && drain_tx_queue(link, *tx_queue) > 0) {
+    int sent = 0;
+    bool backlog = false;
+    bool send_failed = false;
+    if (tx_queue != nullptr) {
+      const auto drained = detail::drain_tx_queue(link, *tx_queue, stop, detail::kMaxTxBatch);
+      sent = drained.sent;
+      send_failed = drained.failed;
+      // A failing link must not turn the backlog into a busy loop: fall through
+      // to a normal (sleeping) wait and retry after it.
+      backlog = (tx_queue->size() > 0) && !send_failed;
+    }
+    if (sent > 0 && !backlog) {
       continue;
     }
 
     // ---------------- Wait for activity ----------------
-    const auto activity = wait_for_activity(link, tx_queue, wait_timeout_ms);
+    // While a backlog remains, poll with a zero timeout: that services inbound
+    // telegrams between two write batches instead of starving them.
+    auto activity = detail::wait_for_activity(link, tx_queue, backlog ? 0 : wait_timeout_ms);
     if (activity == Activity::Tx) {
       continue;  // a worker queued a telegram — send it right away
     }
-    if (activity == Activity::Data && drain_telegrams(link, cache) > 0) {
-      backoff_ms = initial_backoff_ms;
+    if (activity == Activity::Data) {
+      if (drain_telegrams(link, cache) > 0) {
+        backoff_ms = initial_backoff_ms;
+      }
+      // The datagram just read may have announced a dead connection.
+      if (!link.is_connected()) {
+        activity = Activity::Error;
+      }
     }
     if (activity == Activity::Error) {
       // Connection lost (daemon restarted / "Link down, terminating" /

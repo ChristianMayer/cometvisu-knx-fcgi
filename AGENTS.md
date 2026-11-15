@@ -442,10 +442,32 @@ tests that need deferred data arrival, use a separate thread that calls
 `cache_.push()` after a short delay while the handler is blocked in
 `wait_for_new_data()`.
 
-For knxd-dependent tests, the `MockKnxdClient` in `mocks/mock_knxd_socket.h`
-provides a fake implementation.  It is used by write-handler tests and
-connection tests, but is no longer needed by ReadHandler tests (the ReadHandler
-uses the shared cache directly, not the knxd socket).
+### Concurrency and failure-mode tests (mandatory for transport code)
+
+The multi-process parts of the system are the ones that break silently, so they
+each own a dedicated suite — extend them, do not weaken them:
+
+| Suite | What it proves |
+|---|---|
+| `tests/integration/test_tx_queue_multiprocess.cpp` | forked producers lose/duplicate/reorder nothing, a killed producer does not wedge the ring, `EOWNERDEAD` recovery under load, full queue rejects cleanly, a restarted consumer finds the backlog intact |
+| `tests/unit/test_cache_reader_backpressure.cpp` | slow/silent bus, backlog preserved across an outage, prompt shutdown with a large backlog, concurrent handler enqueues |
+| `tests/integration/test_transport_recovery.cpp` | real `TunnelingBusLink` + queue against a rate-limited / silent / restarting router: exactly-once delivery, backlog survives the outage, device-side tunnel loss triggers a reconnect |
+| `test_concurrent_clients` (new cases) | many FCGI clients across forked workers reach the bus exactly once; writes during an outage are rejected **and not queued**; blocked long-polls never delay `/w` |
+
+Rules these tests encode (do not regress them):
+- the TX ring is peek-then-drop: a telegram is only removed after the link
+  accepted it;
+- at most `kMaxTxBatch` telegrams are sent per drain call, with a zero-timeout
+  poll in between, so RX and `should_stop()` are never starved;
+- a failed send must fall through to a sleeping wait — a backlog plus a failing
+  link must never spin;
+- every loop iteration re-checks `BusLink::is_connected()`: a link can die
+  between two polls (device dropped the tunnel) and the reconnect depends on it.
+
+For transport-independent tests, `MockBusLink` in `mocks/mock_bus_link.h`
+provides a scriptable `BusLink` (connection failures, send failures, queued
+inbound telegrams).  ReadHandler tests do not need it: they push directly into
+the shared cache.
 
 ## Reference: Existing CometVisu Backend Implementations
 

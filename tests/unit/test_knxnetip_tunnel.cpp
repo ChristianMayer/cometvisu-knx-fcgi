@@ -734,4 +734,137 @@ TEST(TunnelingBusLinkTest, IgnoresATruncatedConnectionStateResponse) {
   EXPECT_FALSE(link.poll_group_telegram(group, apdu));
   EXPECT_TRUE(link.is_connected());
 }
+
+TEST(TunnelingBusLinkTest, DelayedAckSucceedsOnRetransmissionWithoutDuplicating) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.ack_timeout_ms = 30;  // shorter than the router's answer delay
+  options.retries = 3;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  bool sent = false;
+  std::thread sender([&link, &sent] { sent = link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}); });
+
+  Bytes first;
+  ASSERT_TRUE(router.receive(first));
+  Bytes second;
+  ASSERT_TRUE(router.receive(second)) << "no retransmission after the ACK timeout";
+
+  const auto first_request = knxnetip::parse_tunnelling_request(first);
+  const auto second_request = knxnetip::parse_tunnelling_request(second);
+  ASSERT_TRUE(first_request.has_value());
+  ASSERT_TRUE(second_request.has_value());
+  EXPECT_EQ(first_request->sequence, 0);
+  EXPECT_EQ(second_request->sequence, 0) << "a retransmission must reuse the sequence";
+  EXPECT_EQ(first_request->cemi, second_request->cemi);
+
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, second_request->sequence));
+  sender.join();
+
+  EXPECT_TRUE(sent);
+  EXPECT_EQ(link.next_sequence(), 1) << "one delivery, one sequence step";
+}
+
+TEST(TunnelingBusLinkTest, StaleAckDoesNotConfuseTheNextTelegram) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  bool sent = false;
+  std::thread sender([&link, &sent] { sent = link.send_group_packet(0x0A03, {0x00, 0x80, 0x01}); });
+  Bytes request;
+  ASSERT_TRUE(router.receive(request));
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, 0));
+  sender.join();
+  ASSERT_TRUE(sent);
+
+  // A duplicate ACK for the completed sequence and a bogus one must not be
+  // mistaken for the acknowledgement of the *next* telegram.
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, 0));
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, 0x7F));
+
+  sent = false;
+  std::thread second_sender(
+      [&link, &sent] { sent = link.send_group_packet(0x0A04, {0x00, 0x80, 0x02}); });
+  Bytes second;
+  ASSERT_TRUE(router.receive(second));
+  const auto parsed = knxnetip::parse_tunnelling_request(second);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->sequence, 1);
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, 1));
+  second_sender.join();
+
+  EXPECT_TRUE(sent);
+  EXPECT_EQ(link.next_sequence(), 2);
+}
+
+TEST(TunnelingBusLinkTest, BurstOfInboundFramesIsDeliveredInOrderAndAcked) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  constexpr int kBurst = 5;
+  for (int i = 0; i < kBurst; ++i) {
+    router.reply(knxnetip::build_tunnelling_request(
+        kChannel, static_cast<std::uint8_t>(i),
+        IndicationCemi(static_cast<std::uint16_t>(0x0A00 + i),
+                       {0x00, 0x80, static_cast<std::uint8_t>(i)})));
+  }
+
+  for (int i = 0; i < kBurst; ++i) {
+    std::uint16_t addr = 0;
+    Bytes apdu;
+    ASSERT_TRUE(link.poll_group_telegram(addr, apdu)) << "frame " << i;
+    EXPECT_EQ(addr, 0x0A00 + i) << "burst order broken";
+    EXPECT_EQ(apdu.at(2), i);
+
+    Bytes ack;
+    ASSERT_TRUE(router.receive(ack));
+    const auto parsed = knxnetip::parse_tunnelling_ack(ack);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->sequence, i) << "each frame must be ACKed with its own sequence";
+  }
+  EXPECT_EQ(link.get_telegram_count(), static_cast<std::uint64_t>(kBurst));
+}
+
+TEST(TunnelingBusLinkTest, InboundFramesArrivingDuringSendAreNotLost) {
+  // Real buses interleave: while we wait for our ACK, the device delivers other
+  // telegrams.  They must be queued, not dropped, and must not disturb the
+  // sequence bookkeeping of our own frame.
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  bool sent = false;
+  std::thread sender([&link, &sent] { sent = link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}); });
+
+  Bytes request;
+  ASSERT_TRUE(router.receive(request));
+  const auto parsed = knxnetip::parse_tunnelling_request(request);
+  ASSERT_TRUE(parsed.has_value());
+
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 0, IndicationCemi(0x0B01, {0x00, 0x80, 0x11})));
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, parsed->sequence));
+  sender.join();
+
+  EXPECT_TRUE(sent);
+  EXPECT_EQ(link.next_sequence(), 1);
+
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  ASSERT_TRUE(link.poll_group_telegram(addr, apdu)) << "inbound frame was lost during the send";
+  EXPECT_EQ(addr, 0x0B01);
+  EXPECT_EQ(apdu, (Bytes{0x00, 0x80, 0x11}));
+  EXPECT_EQ(link.get_telegram_count(), 1U);
+
+  // The frame was ACKed exactly once, with its own sequence.
+  Bytes ack;
+  ASSERT_TRUE(router.receive(ack));
+  const auto parsed_ack = knxnetip::parse_tunnelling_ack(ack);
+  ASSERT_TRUE(parsed_ack.has_value());
+  EXPECT_EQ(parsed_ack->sequence, 0);
+}
+
 }  // namespace cvknx
