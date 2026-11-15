@@ -2,6 +2,7 @@
 build/
 build-rel/
 build-noknxd/
+build-cov/
 cmake-build-*/
 
 # IDE
@@ -31,3 +32,5 @@ CTestTestfile.cmake
 .DS_Store
 *.log
 .cache
+coverage-report.txt
+coverage-gaps.txt

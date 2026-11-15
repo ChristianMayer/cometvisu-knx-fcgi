@@ -1,0 +1,210 @@
+{
+  "src/bus/bus_config.cpp": {
+    "branch": 96.129,
+    "line": 99.1453
+  },
+  "src/bus/bus_config.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/bus/bus_connector.cpp": {
+    "branch": 96.6667,
+    "line": 100.0
+  },
+  "src/bus/bus_factory.cpp": {
+    "branch": 88.8889,
+    "line": 72.7273
+  },
+  "src/bus/bus_link.h": {
+    "branch": 100.0,
+    "line": 58.5366
+  },
+  "src/bus/shared_tx_bus_link.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/bus/shared_tx_bus_link.h": {
+    "branch": 50.0,
+    "line": 55.0
+  },
+  "src/fcgi/fcgi_request.cpp": {
+    "branch": 82.1429,
+    "line": 100.0
+  },
+  "src/fcgi/fcgi_request.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/fcgi/fcgi_server.cpp": {
+    "branch": 7.1066,
+    "line": 18.3036
+  },
+  "src/handlers/knxd_status_json.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/handlers/login_handler.cpp": {
+    "branch": 71.0145,
+    "line": 91.1111
+  },
+  "src/handlers/login_handler.h": {
+    "branch": 100.0,
+    "line": 60.0
+  },
+  "src/handlers/read_handler.cpp": {
+    "branch": 91.6031,
+    "line": 97.6562
+  },
+  "src/handlers/read_handler.h": {
+    "branch": 100.0,
+    "line": 60.0
+  },
+  "src/handlers/write_handler.cpp": {
+    "branch": 95.3125,
+    "line": 100.0
+  },
+  "src/handlers/write_handler.h": {
+    "branch": 100.0,
+    "line": 75.0
+  },
+  "src/knxd/cache_reader.cpp": {
+    "branch": 88.4615,
+    "line": 92.0863
+  },
+  "src/knxd/cache_reader.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxd/knxd_client.cpp": {
+    "branch": 28.1369,
+    "line": 43.5374
+  },
+  "src/knxd/knxd_protocol.cpp": {
+    "branch": 89.6552,
+    "line": 95.0
+  },
+  "src/knxd/knxd_protocol.h": {
+    "branch": 66.6667,
+    "line": 100.0
+  },
+  "src/knxnetip/cemi.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxnetip/cemi.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxnetip/discovery.cpp": {
+    "branch": 71.7391,
+    "line": 85.0746
+  },
+  "src/knxnetip/discovery.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxnetip/knxnetip_frame.cpp": {
+    "branch": 93.8202,
+    "line": 98.7342
+  },
+  "src/knxnetip/knxnetip_frame.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxnetip/routing_bus_link.cpp": {
+    "branch": 80.2083,
+    "line": 90.8397
+  },
+  "src/knxnetip/routing_bus_link.h": {
+    "branch": 100.0,
+    "line": 62.5
+  },
+  "src/knxnetip/tunneling_bus_link.cpp": {
+    "branch": 85.7143,
+    "line": 92.5795
+  },
+  "src/knxnetip/tunneling_bus_link.h": {
+    "branch": 50.0,
+    "line": 57.1429
+  },
+  "src/main.cpp": {
+    "branch": 43.4874,
+    "line": 61.9355
+  },
+  "src/router/router.cpp": {
+    "branch": 100.0,
+    "line": 95.8333
+  },
+  "src/router/router.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/state/group_cache.cpp": {
+    "branch": 88.3721,
+    "line": 93.3333
+  },
+  "src/state/group_cache.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/state/session_store.cpp": {
+    "branch": 93.3333,
+    "line": 96.8254
+  },
+  "src/state/session_store.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/state/shared_group_cache.cpp": {
+    "branch": 72.381,
+    "line": 83.6957
+  },
+  "src/state/shared_group_cache.h": {
+    "branch": 100.0,
+    "line": 92.8571
+  },
+  "src/state/shared_tx_queue.cpp": {
+    "branch": 92.5926,
+    "line": 93.6937
+  },
+  "src/state/shared_tx_queue.h": {
+    "branch": 100.0,
+    "line": 90.0
+  },
+  "src/util/debug_log.cpp": {
+    "branch": 92.8571,
+    "line": 100.0
+  },
+  "src/util/debug_log.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/util/fork_safety.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/util/hex.cpp": {
+    "branch": 85.1852,
+    "line": 93.75
+  },
+  "src/util/json_builder.cpp": {
+    "branch": 71.4286,
+    "line": 78.6667
+  },
+  "src/util/json_builder.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/util/query_string.cpp": {
+    "branch": 81.1765,
+    "line": 91.8919
+  },
+  "src/util/query_string.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/version.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  }
+}

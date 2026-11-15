@@ -42,6 +42,52 @@ ctest --test-dir build -R test_query_string --output-on-failure
 ctest --test-dir build -V
 ```
 
+## Code Coverage
+
+Every executable line and every branch arm in `src/` must be reached by a
+test.  The gate is `tools/check_coverage.py`; `tools/coverage.sh` builds an
+instrumented tree, runs the whole suite and then gates.
+
+- `tools/coverage.sh` — ratchet mode (default).  A file listed in
+  `tools/coverage-baseline.json` must not drop below its recorded numbers; any
+  file **not** listed (i.e. everything new) must be at 100 % lines *and*
+  100 % branch arms.
+- `tools/coverage.sh --strict` — the target state: 100 % everywhere.  Use it
+  to prove a gap is closed.
+- `tools/coverage.sh --list-uncovered` — prints the exact line numbers and
+  branch arms that are still missing.
+
+Rules:
+
+1. **New code is never added to the baseline.**  Only legacy files are listed
+   there.  If a change adds a file, it must be fully covered in the same PR.
+2. When a legacy gap is closed, re-record with
+   `python3 tools/check_coverage.py --write-baseline tools/coverage-baseline.json`
+   — never lower an existing entry by hand.
+3. **CI enforces the gate on every pull request** (`.github/workflows/ci.yml`,
+   job `coverage`): it builds with `ENABLE_COVERAGE=ON`, runs the suite, runs
+   `tools/check_coverage.py` against the committed baseline, writes the
+   per-file table into the job summary and uploads the report.  A regression or
+   an uncovered new file fails the PR.
+4. Use a separate build directory (`build-cov`, the default of
+   `tools/coverage.sh`).  `ENABLE_COVERAGE=ON` adds
+   `--coverage -O0 -g -fprofile-update=atomic`; the atomic update is required
+   because the tests fork workers that write the same `.gcda` files.
+
+Exclusions are acceptable **only** for code that a test process cannot reach:
+`fork()` children that `_Exit()` before flushing, signal handlers, and
+OS-failure paths that cannot be injected (`socket()`, `mmap()`, `eventfd()`,
+a refused multicast join).  Mark them inline and say why:
+
+```cpp
+if (fd_ < 0) {  // GCOV_EXCL_BR_LINE - only fails on fd exhaustion
+  ...
+}
+```
+
+Supported by the checker: `GCOV_EXCL_LINE`, `GCOV_EXCL_BR_LINE`,
+`GCOV_EXCL_START` / `GCOV_EXCL_STOP`.  Exception-unwind arms are ignored.
+
 ## Coding Style
 
 - **C++20** standard.

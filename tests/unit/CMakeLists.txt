@@ -169,3 +169,15 @@ add_executable(test_discovery
 )
 target_link_libraries(test_discovery PRIVATE cvknx_transport GTest::gtest GTest::gtest_main)
 add_test(NAME test_discovery COMMAND test_discovery)
+
+add_executable(test_knxnetip_frame_negative
+    test_knxnetip_frame_negative.cpp
+)
+target_link_libraries(test_knxnetip_frame_negative PRIVATE cvknx_transport GTest::gtest GTest::gtest_main)
+add_test(NAME test_knxnetip_frame_negative COMMAND test_knxnetip_frame_negative)
+
+add_executable(test_transport_edge_cases
+    test_transport_edge_cases.cpp
+)
+target_link_libraries(test_transport_edge_cases PRIVATE cvknx_transport GTest::gtest GTest::gtest_main)
+add_test(NAME test_transport_edge_cases COMMAND test_transport_edge_cases)

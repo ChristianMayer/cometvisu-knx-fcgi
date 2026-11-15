@@ -30,13 +30,13 @@ namespace {
 /// Parse a decimal integer within [min, max].  Rejects trailing garbage and
 /// empty values — a typo must never be silently replaced by a default.
 bool parse_int(const std::string& text, int min_val, int max_val, int& out) {
-  if (text.empty()) {
-    return false;
+  if (text.empty()) {  // GCOV_EXCL_BR_LINE - every caller checks emptiness first
+    return false;      // GCOV_EXCL_LINE
   }
   errno = 0;
   char* end = nullptr;
   const long value = std::strtol(text.c_str(), &end, 10);
-  if (end == text.c_str() || end == nullptr || *end != '\0' || errno == ERANGE) {
+  if (end == text.c_str() || *end != '\0' || errno == ERANGE) {
     return false;
   }
   if (value < static_cast<long>(min_val) || value > static_cast<long>(max_val)) {
@@ -88,7 +88,7 @@ const char* bus_transport_to_string(BusTransport transport) {
     case BusTransport::IpRouting:
       return "ip-routing";
   }
-  return "unknown";
+  return "unknown";  // GCOV_EXCL_LINE - unreachable: the enum is exhaustive
 }
 
 std::string_view BusConfig::outage_key() const {

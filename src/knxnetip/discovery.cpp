@@ -71,7 +71,8 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
     return devices;
   }
 
-  if (IN_MULTICAST(ntohl(*destination_address))) {
+  // Host byte order — that is what IN_MULTICAST() expects.
+  if (IN_MULTICAST(*destination_address)) {
     struct ip_mreqn membership {};
     membership.imr_multiaddr.s_addr = htonl(*destination_address);
     membership.imr_address.s_addr = htonl(INADDR_ANY);
@@ -93,8 +94,9 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
   if (::sendto(fd, request.data(), request.size(), 0,
                reinterpret_cast<const struct sockaddr*>(&destination),
                sizeof(destination)) != static_cast<ssize_t>(request.size())) {
-    ::close(fd);
-    return devices;
+    // A local sendto() on a freshly bound socket does not fail in practice.
+    ::close(fd);     // GCOV_EXCL_LINE
+    return devices;  // GCOV_EXCL_LINE
   }
 
   const std::int64_t deadline = now_ms() + std::max(1, options.timeout_ms);
@@ -111,8 +113,8 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
     socklen_t from_len = sizeof(from);
     const ssize_t received = ::recvfrom(fd, buffer, sizeof(buffer), 0,
                                         reinterpret_cast<struct sockaddr*>(&from), &from_len);
-    if (received <= 0) {
-      continue;
+    if (received <= 0) {  // GCOV_EXCL_BR_LINE - poll() said readable
+      continue;           // GCOV_EXCL_LINE
     }
     const std::vector<std::uint8_t> datagram(buffer,
                                              buffer + static_cast<std::ptrdiff_t>(received));

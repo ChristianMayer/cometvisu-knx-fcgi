@@ -412,5 +412,124 @@ TEST(TunnelingBusLinkTest, LabelNamesTheDevice) {
   EXPECT_NE(link.label().find("127.0.0.1:3671"), std::string::npos);
 }
 
+// ---- Error and boundary paths ----
+
+TEST(TunnelingBusLinkTest, ConnectRejectsInvalidHost) {
+  TunnelOptions options = LoopbackOptions(3671);
+  options.host = "not-an-ip";
+  TunnelingBusLink link(options);
+  EXPECT_FALSE(link.connect());
+}
+
+TEST(TunnelingBusLinkTest, ConnectRejectsInvalidLocalAddress) {
+  TunnelOptions options = LoopbackOptions(3671);
+  options.local_addr = "not-an-ip";
+  TunnelingBusLink link(options);
+  EXPECT_FALSE(link.connect());
+}
+
+TEST(TunnelingBusLinkTest, SendFailsWithoutConnection) {
+  TunnelingBusLink link(LoopbackOptions(3671));
+  EXPECT_FALSE(link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
+  EXPECT_EQ(link.wait_for_activity(1), BusLink::WaitResult::Error);
+  link.set_nonblocking(true);  // no socket — must be a no-op
+}
+
+TEST(TunnelingBusLinkTest, SendRejectsEmptyApdu) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  EXPECT_FALSE(link.send_group_packet(0x0A03, {}));
+}
+
+TEST(TunnelingBusLinkTest, IgnoresUnparsableDatagrams) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(Bytes{0x01, 0x02, 0x03});
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+}
+
+TEST(TunnelingBusLinkTest, IgnoresForeignAcknowledgement) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(knxnetip::build_tunnelling_ack(0x99, 7));  // other channel
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, 7));  // wrong sequence
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+}
+
+TEST(TunnelingBusLinkTest, IgnoresConnectionStateResponseForAnotherChannel) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(ConnectionStateResponse(0x99, 0x04));
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, DeviceDisconnectMakesTheTunnelLost) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(knxnetip::build_disconnect_request(kChannel, Hpai{0U, 0U}));
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Error);
+  EXPECT_FALSE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, IgnoresTunnellingRequestForAnotherChannel) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  const auto cemi_bytes = IndicationCemi(0x0A03, {0x00, 0x80, 0x42});
+  router.reply(knxnetip::build_tunnelling_request(0x99, 0, cemi_bytes));
+
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+  EXPECT_EQ(link.get_telegram_count(), 0U);
+}
+
+TEST(TunnelingBusLinkTest, DestructorWithoutConnectIsSafe) {
+  { TunnelingBusLink link(LoopbackOptions(3671)); }
+  SUCCEED();
+}
+
+TEST(TunnelingBusLinkTest, IgnoresNonConnectDatagramsWhileConnecting) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+
+  bool connected = false;
+  std::thread connect_thread([&link, &connected] { connected = link.connect(); });
+  Bytes request;
+  ASSERT_TRUE(router.receive(request));
+
+  // A stray datagram before the CONNECT_RESPONSE must be ignored, not fatal.
+  router.reply(Bytes{0x06, 0x10, 0x03, 0x30, 0x00, 0x06});
+  router.reply(ConnectResponse(kChannel, 0x00, 0x1101));
+  connect_thread.join();
+
+  EXPECT_TRUE(connected);
+}
+
+TEST(TunnelingBusLinkTest, IgnoresUnhandledServiceTypes) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(knxnetip::build_search_request(Hpai{0U, 0U}));
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+}
+
 }  // namespace
 }  // namespace cvknx

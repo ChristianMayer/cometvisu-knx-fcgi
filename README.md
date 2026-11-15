@@ -93,6 +93,25 @@ KNX_TRANSPORT=ip-routing KNX_IP_IFACE=eth0 FCGI_SOCKET=:9000 \
 ./build/src/cometvisu-knx-fcgi --discover
 ```
 
+### Code coverage
+
+```bash
+tools/coverage.sh                  # instrumented build + tests + gate
+tools/coverage.sh --strict         # require 100 % lines and branches everywhere
+tools/coverage.sh --list-uncovered # show what is still missing
+```
+
+CI measures coverage on **every pull request** (`.github/workflows/ci.yml`,
+job `coverage`), publishes the per-file table in the workflow summary and fails
+the PR on a regression or on new code that is not fully covered.
+
+The gate is `tools/check_coverage.py`: it reads the gcov counters of every
+translation unit and requires that each line and each branch arm of `src/` is
+reached.  Files listed in `tools/coverage-baseline.json` may keep their
+recorded (legacy) coverage but must never regress; any file that is not listed
+must be fully covered.  Use a separate build directory — `tools/coverage.sh`
+does that for you.
+
 ### Environment variables
 
 | Variable              | Default    | Description                              |

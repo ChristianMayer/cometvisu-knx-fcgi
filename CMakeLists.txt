@@ -51,6 +51,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ---- Options ----
 option(BUILD_TESTING "Build tests" ON)
 option(ENABLE_SANITIZERS "Enable address/undefined-behavior sanitizers" OFF)
+# gcov instrumentation for the coverage gate (tools/check_coverage.py).
+# A separate build directory is required: a normal build must not carry the
+# counters, and stale .gcda files would silently dilute the result.
+option(ENABLE_COVERAGE "Instrument the build for gcov coverage measurement" OFF)
 # The knxd (eibd Unix socket) transport needs <eibtypes.h>.  KNXnet/IP needs no
 # external header at all, so the transport can be switched off for builds that
 # must not depend on knxd-dev being installed.
@@ -200,6 +204,15 @@ endif()
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(ENABLE_COVERAGE)
+    # -O0 keeps line/branch mapping exact; --coverage adds -fprofile-arcs
+    # -ftest-coverage.  Atomic updates are mandatory here: the tests fork
+    # worker processes that all write the same .gcda files.
+    add_compile_options(--coverage -O0 -g -fprofile-update=atomic)
+    add_link_options(--coverage)
+    message(STATUS "Coverage instrumentation enabled (gcov)")
 endif()
 
 # ---- Subdirectories ----

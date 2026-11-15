@@ -165,5 +165,25 @@ TEST(DiscoveryTest, InvalidAddressYieldsNoDevices) {
   EXPECT_TRUE(discover_devices(options).empty());
 }
 
+TEST(DiscoveryTest, DuplicateAnswersAreCollapsed) {
+  FakeDevice device;
+  DiscoveryOptions options;
+  options.address = "127.0.0.1";
+  options.port = device.port();
+  options.timeout_ms = 300;
+
+  std::vector<DiscoveredDevice> discovered;
+  std::thread worker([&] { discovered = discover_devices(options); });
+
+  Bytes request;
+  ASSERT_TRUE(device.receive(request));
+  // The same device answers twice (e.g. once per interface).
+  device.reply(SearchResponse("Test-device", 0x1101));
+  device.reply(SearchResponse("Test-device", 0x1101));
+  worker.join();
+
+  EXPECT_EQ(discovered.size(), 1U) << "one entry per endpoint";
+}
+
 }  // namespace
 }  // namespace cvknx

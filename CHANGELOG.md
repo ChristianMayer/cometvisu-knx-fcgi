@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Discovery**: `cometvisu-knx-fcgi --discover` sends a SEARCH_REQUEST and
   prints every answering device with its individual and multicast address
   (`src/knxnetip/discovery.*`).
+- **Coverage gate** (`ENABLE_COVERAGE=ON`, `tools/coverage.sh`,
+  `tools/check_coverage.py`): every line and every branch arm in `src/` must be
+  reached by a test.  New files must be at 100 %; files in
+  `tools/coverage-baseline.json` must not regress, and `--strict` enforces
+  100 % everywhere.  New tests: `test_knxnetip_frame_negative`,
+  `test_transport_edge_cases` (plus many added cases).
 - `test_bus_config`, `test_shared_tx_queue`, `test_shared_tx_bus_link`,
   `test_knxnetip_frame`, `test_cemi`, `test_knxnetip_routing`,
   `test_knxnetip_tunnel`, `test_discovery`.

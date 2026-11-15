@@ -188,5 +188,98 @@ TEST(BusConfigTest, TransportNamesRoundTrip) {
   EXPECT_FALSE(bus_transport_from_string("").has_value());
 }
 
+TEST(BusConfigTest, DescribeCoversEveryTransport) {
+  std::string error;
+
+  const auto tunnel = parse_env({{"KNX_TRANSPORT", "ip-tunnel"},
+                                 {"KNX_IP_HOST", "10.1.2.3"},
+                                 {"KNX_IP_PORT", "4000"},
+                                 {"KNX_IP_LOCAL_ADDR", "10.1.2.4"},
+                                 {"KNX_IP_NAT", "1"}},
+                                error);
+  ASSERT_TRUE(tunnel.has_value()) << error;
+  const std::string tunnel_text = tunnel->describe();
+  EXPECT_NE(tunnel_text.find("ip-tunnel"), std::string::npos);
+  EXPECT_NE(tunnel_text.find("10.1.2.3:4000"), std::string::npos);
+  EXPECT_NE(tunnel_text.find("local=10.1.2.4"), std::string::npos);
+  EXPECT_NE(tunnel_text.find("nat=1"), std::string::npos);
+
+  const auto routing = parse_env({{"KNX_TRANSPORT", "ip-routing"},
+                                  {"KNX_IP_MULTICAST", "239.0.0.9"},
+                                  {"KNX_IP_IFACE", "eth0"}},
+                                 error);
+  ASSERT_TRUE(routing.has_value()) << error;
+  const std::string routing_text = routing->describe();
+  EXPECT_NE(routing_text.find("239.0.0.9:3671"), std::string::npos);
+  EXPECT_NE(routing_text.find("iface=eth0"), std::string::npos);
+
+  // Without an interface the "iface=" part is omitted.
+  const auto routing_default = parse_env({{"KNX_TRANSPORT", "ip-routing"}}, error);
+  ASSERT_TRUE(routing_default.has_value());
+  EXPECT_EQ(routing_default->describe().find("iface="), std::string::npos);
+}
+
+TEST(BusConfigTest, BooleanNATAcceptsEverySpelling) {
+  for (const char* enabled : {"1", "true", "yes", "on"}) {
+    std::string error;
+    const auto cfg = parse_env(
+        {{"KNX_TRANSPORT", "ip-tunnel"}, {"KNX_IP_HOST", "10.0.0.1"}, {"KNX_IP_NAT", enabled}},
+        error);
+    ASSERT_TRUE(cfg.has_value()) << enabled << ": " << error;
+    EXPECT_TRUE(cfg->ip_nat) << enabled;
+  }
+  for (const char* disabled : {"0", "false", "no", "off"}) {
+    std::string error;
+    const auto cfg = parse_env(
+        {{"KNX_TRANSPORT", "ip-tunnel"}, {"KNX_IP_HOST", "10.0.0.1"}, {"KNX_IP_NAT", disabled}},
+        error);
+    ASSERT_TRUE(cfg.has_value()) << disabled << ": " << error;
+    EXPECT_FALSE(cfg->ip_nat) << disabled;
+  }
+}
+
+TEST(BusConfigTest, IntegerUpperBoundsAreEnforced) {
+  std::string error;
+  EXPECT_FALSE(parse_env({{"KNX_TRANSPORT", "knxd"}, {"KNX_IP_PORT", "65536"}}, error).has_value());
+  EXPECT_FALSE(parse_env({{"KNX_TRANSPORT", "knxd"}, {"KNX_IP_RETRIES", "11"}}, error).has_value());
+  EXPECT_FALSE(
+      parse_env({{"KNX_TRANSPORT", "knxd"}, {"KNX_IP_ACK_TIMEOUT_MS", "5"}}, error).has_value());
+  EXPECT_FALSE(parse_env({{"KNX_TRANSPORT", "ip-tunnel"},
+                          {"KNX_IP_HOST", "10.0.0.1"},
+                          {"KNX_IP_HEARTBEAT_SEC", "999999"}},
+                         error)
+                   .has_value());
+}
+
+TEST(BusConfigTest, FromEnvReadsTheProcessEnvironment) {
+  ::setenv("KNX_TRANSPORT", "ip-routing", 1);
+  ::setenv("KNX_IP_PORT", "4001", 1);
+  std::string error;
+  const auto cfg = BusConfig::from_env(error);
+  ::unsetenv("KNX_TRANSPORT");
+  ::unsetenv("KNX_IP_PORT");
+
+  ASSERT_TRUE(cfg.has_value()) << error;
+  EXPECT_EQ(cfg->transport, BusTransport::IpRouting);
+  EXPECT_EQ(cfg->ip_port, 4001);
+}
+
+TEST(BusConfigTest, TunnelWithoutLocalAddressOrNatOmitsBothInDescribe) {
+  std::string error;
+  const auto cfg = parse_env({{"KNX_TRANSPORT", "ip-tunnel"}, {"KNX_IP_HOST", "10.0.0.1"}}, error);
+  ASSERT_TRUE(cfg.has_value()) << error;
+  const std::string text = cfg->describe();
+  EXPECT_EQ(text.find("local="), std::string::npos);
+  EXPECT_EQ(text.find("nat="), std::string::npos);
+}
+
+TEST(BusConfigTest, FromEnvWithoutTransportReportsTheRequirement) {
+  ::unsetenv("KNX_TRANSPORT");
+  std::string error;
+  const auto cfg = BusConfig::from_env(error);
+  ASSERT_FALSE(cfg.has_value());
+  EXPECT_NE(error.find("required"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace cvknx
