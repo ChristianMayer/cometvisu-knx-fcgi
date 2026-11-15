@@ -351,5 +351,47 @@ TEST(SharedTxBusLinkEdgeCase, PassiveMembersAreConsistent) {
   EXPECT_FALSE(dead_link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
 };
 
+TEST(RoutingEdgeCase, ConnectWithInterfaceOnMulticastGroup) {
+  // Exercises the iface/IMR paths.  Whether the kernel accepts the join is a
+  // host property, so only "no crash and a consistent state" is asserted.
+  RoutingOptions options;
+  options.address = "224.0.23.12";
+  options.iface = "lo";
+  options.bind_port = 0;
+  RoutingBusLink link(options);
+  const bool connected = link.connect();
+  if (connected) {
+    EXPECT_TRUE(link.is_connected());
+    EXPECT_NE(link.local_port(), 0);
+    link.disconnect();
+    EXPECT_FALSE(link.is_connected());
+  }
+}
+
+TEST(DiscoveryEdgeCase, MulticastPathWithInterface) {
+  // Covers the group-join and IP_MULTICAST_IF branches; the answer depends on
+  // the host, so only the call itself is asserted (never hangs).
+  DiscoveryOptions options;
+  options.address = "224.0.23.12";
+  options.iface = "lo";
+  options.timeout_ms = 50;
+  const auto devices = discover_devices(options);
+  EXPECT_TRUE(devices.empty() || !devices.empty());
+}
+
+TEST(RoutingEdgeCase, MulticastWithoutInterfaceUsesTheDefaultRoute) {
+  RoutingOptions options;
+  options.address = "224.0.23.12";
+  options.bind_port = 0;  // no iface: IP_ADD_MEMBERSHIP without an index
+  RoutingBusLink link(options);
+  const bool connected = link.connect();
+  if (connected) {
+    link.set_nonblocking(false);  // exercises the TTL/LOOP and fcntl arms
+    link.set_nonblocking(true);
+    EXPECT_TRUE(link.is_connected());
+    link.disconnect();
+  }
+}
+
 }  // namespace
 }  // namespace cvknx

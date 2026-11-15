@@ -281,5 +281,21 @@ TEST(BusConfigTest, FromEnvWithoutTransportReportsTheRequirement) {
   EXPECT_NE(error.find("required"), std::string::npos);
 }
 
+TEST(BusConfigTest, OverflowingNumberIsRejected) {
+  // strtol() sets ERANGE and returns LONG_MAX; the value must be rejected,
+  // never silently clamped to the maximum.
+  std::string error;
+  EXPECT_FALSE(
+      parse_env({{"KNX_TRANSPORT", "knxd"}, {"KNX_IP_PORT", "99999999999999999999"}}, error)
+          .has_value());
+  EXPECT_NE(error.find("KNX_IP_PORT"), std::string::npos) << error;
+}
+
+TEST(BusConfigTest, NonNumericValueIsRejected) {
+  std::string error;
+  EXPECT_FALSE(parse_env({{"KNX_TRANSPORT", "knxd"}, {"KNX_IP_PORT", "abc"}}, error).has_value());
+  EXPECT_NE(error.find("KNX_IP_PORT"), std::string::npos) << error;
+}
+
 }  // namespace
 }  // namespace cvknx

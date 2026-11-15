@@ -51,63 +51,60 @@ std::string LoginHandler::handle(std::string_view query_string) {
   json.add_string("v", kProtocolVersion);
   json.add_string("s", session_id);
 
-  // Gather version info (compile-time, lazy cached)
-  bool need_config = !base_url_.empty();
-  const std::string_view fcgi_ver = version();
-  const std::string_view fcgi_hash = git_hash();
-  const std::string_view knxd_bver = knxd_build_version();
-  const std::string_view knxd_bhash = knxd_build_git_hash();
-
-  if (!fcgi_ver.empty() && fcgi_ver != "unknown") {
-    need_config = true;
-  }
-  if (!fcgi_hash.empty() && fcgi_hash != "unknown") {
-    need_config = true;
-  }
-  if (!knxd_bver.empty()) {
-    need_config = true;
-  }
-  if (!knxd_bhash.empty()) {
-    need_config = true;
-  }
-
   // LOGIN_EXTRA_CONFIG: optional environment variable with raw JSON key-value
   // pairs to inject into the "c" block (e.g. `"foo":"bar","knxdRuntimeVersion":"1.2.3"`).
   const char* extra_config = std::getenv("LOGIN_EXTRA_CONFIG");  // NOLINT(concurrency-mt-unsafe)
-  if (extra_config != nullptr && *extra_config != '\0') {
-    need_config = true;
-  }
 
-  if (need_config) {
-    json.add_key("c");
-    json.start_object();
-
-    if (!base_url_.empty()) {
-      json.add_string("baseURL", base_url_);
-    }
-
-    if (!fcgi_ver.empty() && fcgi_ver != "unknown") {
-      json.add_string("fcgiVersion", fcgi_ver);
-    }
-    if (!fcgi_hash.empty() && fcgi_hash != "unknown") {
-      json.add_string("fcgiGitHash", fcgi_hash);
-    }
-    if (!knxd_bver.empty()) {
-      json.add_string("knxdBuildVersion", knxd_bver);
-    }
-    if (!knxd_bhash.empty()) {
-      json.add_string("knxdBuildGitHash", knxd_bhash);
-    }
-    if (extra_config != nullptr && *extra_config != '\0') {
-      json.add_raw(extra_config);
-    }
-
-    json.end_object();
-  }
+  add_login_config_block(
+      json, base_url_,
+      LoginBuildInfo{.fcgi_version = version(),
+                     .fcgi_hash = git_hash(),
+                     .knxd_version = knxd_build_version(),
+                     .knxd_hash = knxd_build_git_hash(),
+                     .extra_config = extra_config != nullptr ? std::string_view{extra_config}
+                                                             : std::string_view{}});
 
   json.end_object();
 
   return json.take();
+}
+
+void add_login_config_block(JsonBuilder& json, std::string_view base_url,
+                            const LoginBuildInfo& info) {
+  // "unknown" is what version()/git_hash() return when CMake could not inject
+  // the value — it carries no information and must not create a "c" block.
+  const auto known = [](std::string_view value) { return !value.empty() && value != "unknown"; };
+
+  const bool need_config = !base_url.empty() || known(info.fcgi_version) || known(info.fcgi_hash) ||
+                           !info.knxd_version.empty() || !info.knxd_hash.empty() ||
+                           !info.extra_config.empty();
+  if (!need_config) {
+    return;
+  }
+
+  json.add_key("c");
+  json.start_object();
+
+  if (!base_url.empty()) {
+    json.add_string("baseURL", base_url);
+  }
+  if (known(info.fcgi_version)) {
+    json.add_string("fcgiVersion", info.fcgi_version);
+  }
+  if (known(info.fcgi_hash)) {
+    json.add_string("fcgiGitHash", info.fcgi_hash);
+  }
+  if (!info.knxd_version.empty()) {
+    json.add_string("knxdBuildVersion", info.knxd_version);
+  }
+  if (!info.knxd_hash.empty()) {
+    json.add_string("knxdBuildGitHash", info.knxd_hash);
+  }
+  if (!info.extra_config.empty()) {
+    json.add_raw(info.extra_config);
+  }
+
+  json.end_object();
 }
 
 }  // namespace cvknx

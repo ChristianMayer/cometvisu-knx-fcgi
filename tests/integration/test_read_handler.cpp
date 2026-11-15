@@ -1172,3 +1172,53 @@ TEST_F(ReadHandlerTest, HasNoKnxdBlockWhileKnxdIsAvailable) {
   EXPECT_EQ(r.http_status, 200);
   EXPECT_EQ(r.body.find("\"knxd\""), std::string::npos) << r.body;
 }
+
+// ================================================================
+// Timeout / index parameter edge cases
+// ================================================================
+
+TEST_F(ReadHandlerTest, EmptyTimeoutParameterIsRejected) {
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=");
+  EXPECT_EQ(r.http_status, 400);
+  EXPECT_NE(r.body.find("invalid timeout"), std::string::npos);
+}
+
+TEST_F(ReadHandlerTest, TimeoutWithTrailingGarbageIsRejected) {
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&t=5x");
+  EXPECT_EQ(r.http_status, 400);
+}
+
+TEST_F(ReadHandlerTest, NegativeIndexIsIgnored) {
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=-5&t=-1");
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find(R"("i":0)"), std::string::npos) << r.body;
+}
+
+TEST_F(ReadHandlerTest, UnrelatedTelegramsKeepTheLoopPollingUntilTheDeadline) {
+  // Two pushes of a non-subscribed address wake the loop without producing a
+  // delta; the second wake-up happens after the deadline, which ends the poll
+  // loop instead of waiting again.
+  ReadHandler handler(cache_, knxd_, sessions_);
+  std::thread writer([this] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    cache_.push(0x0909, {0x01});
+    // Land after the deadline of the second wait (1.0 s) but before it ends
+    // (1.5 s), so the loop has to notice that the deadline has passed.
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    cache_.push(0x0909, {0x02});
+  });
+  auto r = handler.handle("a=1/2/3&t=1");
+  writer.join();
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find(R"("d":{})"), std::string::npos) << r.body;
+}
+
+TEST_F(ReadHandlerTest, UnparsableIndexIsIgnored) {
+  ReadHandler handler(cache_, knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&i=abc&t=-1");
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_NE(r.body.find(R"("i":0)"), std::string::npos) << r.body;
+}

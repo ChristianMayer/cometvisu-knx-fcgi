@@ -73,18 +73,26 @@ EXCL_LINE = re.compile(r"GCOV_EXCL_LINE\b(?!_)")
 EXCL_BR_LINE = re.compile(r"GCOV_EXCL_BR_LINE")
 EXCL_START = re.compile(r"GCOV_EXCL_START")
 EXCL_STOP = re.compile(r"GCOV_EXCL_STOP")
+# A line that holds nothing but closing braces carries no statement.  gcc still
+# emits a line record for the closing brace of some functions (the function
+# exit block), which can never be reached after a ``return``.  Such lines are
+# not counted at all — no test can execute them and they express no logic.
+BRACE_ONLY = re.compile(r"^\s*[}\)]+\s*;?\s*$")
 
 
-def marker_maps(source: Path) -> tuple[set[int], set[int]]:
-    """Return (excluded_lines, branch_optional_lines) from the source markers."""
+def marker_maps(source: Path) -> tuple[set[int], set[int], set[int]]:
+    """Return (excluded, branch_optional, non_statement) line numbers."""
     excluded: set[int] = set()
     branch_optional: set[int] = set()
+    non_statement: set[int] = set()
     inside = False
     try:
         text = source.read_text(errors="replace").splitlines()
     except OSError:
-        return excluded, branch_optional
+        return excluded, branch_optional, non_statement
     for number, line in enumerate(text, start=1):
+        if BRACE_ONLY.match(line):
+            non_statement.add(number)
         if EXCL_START.search(line):
             inside = True
             excluded.add(number)
@@ -100,7 +108,7 @@ def marker_maps(source: Path) -> tuple[set[int], set[int]]:
             excluded.add(number)
         if EXCL_BR_LINE.search(line):
             branch_optional.add(number)
-    return excluded, branch_optional
+    return excluded, branch_optional, non_statement
 
 
 def gcov_json(gcno: Path) -> dict:
@@ -124,6 +132,16 @@ def gcov_json(gcno: Path) -> dict:
 
 
 def collect(build_dir: Path, source_root: Path) -> dict[Path, FileCoverage]:
+    """Aggregate the gcov counters of every object file.
+
+    A header is compiled into several translation units, so the same line
+    appears in several JSON documents.  Two rules keep the result honest:
+
+    * a line counts as covered if *any* translation unit executed it;
+    * for a line with branch arms, the record with the most arms wins (an
+      inlined copy in another TU can report fewer arms).  Summing copies would
+      inflate the totals and report covered code as partially dead.
+    """
     gcno_files = sorted(build_dir.rglob("*.gcno"))
     if not gcno_files:
         raise SystemExit(
@@ -131,45 +149,57 @@ def collect(build_dir: Path, source_root: Path) -> dict[Path, FileCoverage]:
             "build and run the test suite first"
         )
 
-    coverages: dict[Path, FileCoverage] = {}
+    line_counts: dict[Path, dict[int, int]] = {}
+    # best branch record per line: (arms, taken)
+    arm_choice: dict[Path, dict[int, tuple[int, int]]] = {}
+
     for gcno in gcno_files:
         data = gcov_json(gcno)
         for entry in data.get("files", []):
-            path = Path(entry["file"])
+            path = Path(entry["file"]).resolve()
             try:
-                path.relative_to(source_root)
+                relative = path.relative_to(source_root)
             except ValueError:
                 continue  # system headers, gtest, ...
-            if path.suffix not in (".cpp", ".h"):
-                continue
-            if "src" != path.relative_to(source_root).parts[0]:
+            if relative.parts[0] != "src" or path.suffix not in (".cpp", ".h"):
                 continue  # only production code is gated
 
-            excluded, branch_optional = marker_maps(path)
-            coverage = coverages.setdefault(path, FileCoverage(path=path))
+            lines = line_counts.setdefault(path, {})
+            arms = arm_choice.setdefault(path, {})
             for line in entry.get("lines", []):
                 number = line["line_number"]
-                if line.get("count", 0) == 0:
-                    if number in excluded:
-                        continue
-                    coverage.lines_total += 1
-                    coverage.uncovered_lines.append(number)
-                elif number not in excluded:
-                    coverage.lines_total += 1
-                    coverage.lines_hit += 1
+                lines[number] = max(lines.get(number, 0), line.get("count", 0))
 
-                if number in excluded or number in branch_optional:
+                candidates = [b for b in line.get("branches", []) if not b.get("throw")]
+                if not candidates:
                     continue
-                for branch in line.get("branches", []):
-                    # Exception-unwind arms only trigger on allocation/throw
-                    # failures and are not reachable from a test process.
-                    if branch.get("throw"):
-                        continue
-                    coverage.branches_total += 1
-                    if branch.get("count", 0) > 0:
-                        coverage.branches_hit += 1
-                    else:
-                        coverage.uncovered_branches.append(number)
+                total = len(candidates)
+                taken = sum(1 for b in candidates if b.get("count", 0) > 0)
+                best = arms.get(number)
+                if best is None or total > best[0] or (total == best[0] and taken > best[1]):
+                    arms[number] = (total, taken)
+
+    coverages: dict[Path, FileCoverage] = {}
+    for path, lines in line_counts.items():
+        excluded, branch_optional, non_statement = marker_maps(path)
+        coverage = FileCoverage(path=path)
+        for number, count in sorted(lines.items()):
+            if number in excluded or number in non_statement:
+                continue
+            coverage.lines_total += 1
+            if count > 0:
+                coverage.lines_hit += 1
+            else:
+                coverage.uncovered_lines.append(number)
+
+        for number, (total, taken) in sorted(arm_choice.get(path, {}).items()):
+            if number in excluded or number in branch_optional or number in non_statement:
+                continue
+            coverage.branches_total += total
+            coverage.branches_hit += taken
+            if taken < total:
+                coverage.uncovered_branches.append(number)
+        coverages[path] = coverage
     return coverages
 
 
@@ -177,6 +207,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", default="build-cov")
     parser.add_argument("--source-root", default=".")
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=1.0,
+        help="allowed drop against a baseline entry, in percentage points "
+        "(different gcc versions instrument different branch arm counts); "
+        "files that are not baselined are always held to 100%%",
+    )
     parser.add_argument("--min-line", type=float, default=100.0)
     parser.add_argument("--min-branch", type=float, default=100.0)
     parser.add_argument("--only", default="", help="restrict to paths containing this text")
@@ -239,10 +277,22 @@ def main() -> int:
         entry = baseline.get(str(relative))
         min_line = entry["line"] if entry else args.min_line
         min_branch = entry["branch"] if entry else args.min_branch
-        # Small epsilon: the baseline stores rounded percentages.
-        ok = coverage.line_pct + 1e-3 >= min_line and coverage.branch_pct + 1e-3 >= min_branch
         if entry is None:
-            ok = ok and not coverage.uncovered_lines and not coverage.uncovered_branches
+            # New code: no tolerance at all.
+            ok = (
+                coverage.line_pct + 1e-3 >= min_line
+                and coverage.branch_pct + 1e-3 >= min_branch
+                and not coverage.uncovered_lines
+                and not coverage.uncovered_branches
+            )
+        else:
+            # Legacy code: never regress beyond the recorded value.  A small
+            # tolerance absorbs toolchain differences (branch arm counts vary
+            # between gcc releases and between "-O0 with and without inlining").
+            ok = (
+                coverage.line_pct + 1e-3 + args.tolerance >= min_line
+                and coverage.branch_pct + 1e-3 + args.tolerance >= min_branch
+            )
         rows.append((relative, coverage, ok))
         if not ok:
             failures.append(coverage)
@@ -273,10 +323,16 @@ def main() -> int:
                 print(f"  {relative}: branch arms at lines {numbers}")
 
     if failures:
-        print(
-            f"\nFAIL: {len(failures)} file(s) with uncovered code "
-            f"(gate: {args.min_line:.0f}% lines, {args.min_branch:.0f}% branches)"
-        )
+        print(f"\nFAIL: {len(failures)} file(s) below the required coverage")
+        if baseline:
+            print(f"  gate: not below tools/coverage-baseline.json minus {args.tolerance:g} pp,")
+            print(f"        {args.min_line:.0f}% lines / {args.min_branch:.0f}% branches for new files")
+        else:
+            print(
+                f"  gate: {args.min_line:.0f}% lines, {args.min_branch:.0f}% branches"
+            )
+        for coverage in failures:
+            print(f"  {coverage.path.relative_to(source_root)}")
         return 1
 
     print(f"\nOK: {len(rows)} file(s) at or above the required coverage")

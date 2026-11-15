@@ -38,9 +38,11 @@ bool SharedGroupCache::create() {
 
   void* region = ::mmap(nullptr, sizeof(SharedCacheData), PROT_READ | PROT_WRITE,
                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  // GCOV_EXCL_START - mmap() only fails on address-space exhaustion
   if (region == MAP_FAILED) {
     return false;
   }
+  // GCOV_EXCL_STOP
 
   // Placement-new the SharedCacheData to initialize all fields to zero.
   auto* d = new (region) SharedCacheData{};
@@ -52,11 +54,13 @@ bool SharedGroupCache::create() {
   // Use robust mutex so that if the cache reader crashes while holding
   // the lock, other processes can recover (EOWNERDEAD).
   ::pthread_mutexattr_setrobust(&mutex_attr, PTHREAD_MUTEX_ROBUST);
+  // GCOV_EXCL_START - pthread_mutex_init() only fails on resource exhaustion
   if (::pthread_mutex_init(&d->mutex, &mutex_attr) != 0) {
     ::pthread_mutexattr_destroy(&mutex_attr);
     ::munmap(region, sizeof(SharedCacheData));
     return false;
   }
+  // GCOV_EXCL_STOP
   ::pthread_mutexattr_destroy(&mutex_attr);
 
   // Initialize the process-shared condition variable.
@@ -65,12 +69,14 @@ bool SharedGroupCache::create() {
   ::pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
   // Use monotonic clock for timeout calculations.
   ::pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+  // GCOV_EXCL_START - pthread_cond_init() only fails on resource exhaustion
   if (::pthread_cond_init(&d->cond, &cond_attr) != 0) {
     ::pthread_condattr_destroy(&cond_attr);
     ::pthread_mutex_destroy(&d->mutex);
     ::munmap(region, sizeof(SharedCacheData));
     return false;
   }
+  // GCOV_EXCL_STOP
   ::pthread_condattr_destroy(&cond_attr);
 
   data_ = d;
@@ -86,9 +92,12 @@ void SharedGroupCache::attach(SharedCacheData* data) {
 // ---- Internal helpers ----
 
 size_t SharedGroupCache::find_slot(uint16_t addr) const {
+  // GCOV_EXCL_START - find_slot() is only called after a null check by the
+  // caller; the guard keeps the helper safe on its own.
   if (data_ == nullptr) {
     return kSharedCacheCapacity;
   }
+  // GCOV_EXCL_STOP
   // Simple open addressing with linear probing.
   size_t index = static_cast<size_t>(addr) % kSharedCacheCapacity;
   for (size_t i = 0; i < kSharedCacheCapacity; ++i) {
@@ -120,12 +129,17 @@ void SharedGroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
     return;
   }
 
-  int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result == EOWNERDEAD) {
-    // Previous owner died while holding the lock — make it consistent.
-    ::pthread_mutex_consistent(&data_->mutex);
-  } else if (lock_result != 0) {
-    return;
+  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
+  if (lock_result != 0) {
+    // GCOV_EXCL_START - EOWNERDEAD is the only reachable failure (the previous
+    // owner died); a hard error needs an invalid mutex and cannot be injected.
+    if (lock_result == EOWNERDEAD) {
+      // Previous owner died while holding the lock — make it consistent.
+      ::pthread_mutex_consistent(&data_->mutex);
+    } else {
+      return;
+    }
+    // GCOV_EXCL_STOP
   }
 
   // Increment the raw counter and store the wrapped position so the client-facing
@@ -159,11 +173,15 @@ std::optional<std::vector<uint8_t>> SharedGroupCache::get(uint16_t addr, int max
     return std::nullopt;
   }
 
-  int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result == EOWNERDEAD) {
-    ::pthread_mutex_consistent(&data_->mutex);
-  } else if (lock_result != 0) {
-    return std::nullopt;
+  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
+  if (lock_result != 0) {
+    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
+    if (lock_result == EOWNERDEAD) {
+      ::pthread_mutex_consistent(&data_->mutex);
+    } else {
+      return std::nullopt;
+    }
+    // GCOV_EXCL_STOP
   }
 
   std::optional<std::vector<uint8_t>> result;
@@ -192,11 +210,15 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
     return delta;
   }
 
-  int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result == EOWNERDEAD) {
-    ::pthread_mutex_consistent(&data_->mutex);
-  } else if (lock_result != 0) {
-    return delta;
+  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
+  if (lock_result != 0) {
+    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
+    if (lock_result == EOWNERDEAD) {
+      ::pthread_mutex_consistent(&data_->mutex);
+    } else {
+      return delta;
+    }
+    // GCOV_EXCL_STOP
   }
 
   // Current wrapped position (0-based, wraps at kPositionModulus).
@@ -259,11 +281,15 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
     return false;
   }
 
-  int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result == EOWNERDEAD) {
-    ::pthread_mutex_consistent(&data_->mutex);
-  } else if (lock_result != 0) {
-    return false;
+  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
+  if (lock_result != 0) {
+    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
+    if (lock_result == EOWNERDEAD) {
+      ::pthread_mutex_consistent(&data_->mutex);
+    } else {
+      return false;
+    }
+    // GCOV_EXCL_STOP
   }
 
   uint32_t gen_before = data_->generation.load();
@@ -290,9 +316,12 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
     int rc = ::pthread_cond_timedwait(&data_->cond, &data_->mutex, &ts);
     if (rc == ETIMEDOUT) {
       timed_out = true;
-    } else if (rc != 0) {
+    }
+    // GCOV_EXCL_START - a hard condvar error needs an invalid condvar
+    else if (rc != 0) {
       break;  // error
     }
+    // GCOV_EXCL_STOP
   }
 
   uint32_t gen_after = data_->generation.load();

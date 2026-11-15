@@ -91,6 +91,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `knxd`/`knxd-dev` for the knxd transport, and the networking tools needed for
   KNXnet/IP work.
 
+### Fixed
+
+- **`KnxdClient::connect()` leaked a file descriptor** when the socket path was
+  longer than `sockaddr_un::sun_path`: the early return left the freshly created
+  socket open. Every rejected attempt (a misconfigured `KNXD_SOCKET`) burned one
+  descriptor per reconnect, so the cache reader would eventually exhaust them.
+
+### Tests
+
+- **Coverage gate is enforced in CI** (`tools/check_coverage.py`, job
+  `coverage`): every line and every branch arm under `src/` must be reached by a
+  test.  New files must be at 100 %; the two remaining legacy files
+  (`src/fcgi/fcgi_server.cpp`, `src/main.cpp`) are ratcheted by
+  `tools/coverage-baseline.json`.
+- `KnxdClient` is now at 100 % line and branch coverage: a scripted fake knxd
+  (`tests/unit/test_knxd_client_protocol.cpp`) drives the eibd handshake, group
+  writes, APDU/injected group packets, partial and unparsable frames, handshake
+  deadlines, write/read recovery after a broken socket and the read rate limit.
+- New suites: `test_fcgi_request`, `test_login_handler`'s config-block builder,
+  `test_cache_reader`'s direct `poll()` wake-up paths, plus robust-mutex
+  recovery (a forked child dies holding the shared cache lock) and
+  full-table/age-filter cases for `SharedGroupCache`.
+
 ## [1.2.1] — 2026-11-15
 
 ### Fixed

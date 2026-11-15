@@ -53,7 +53,9 @@ std::string SessionStore::create_session(bool anonymous) {
   }
 
   std::string id = generate_id();
-  sessions_[id] = Session{id, std::chrono::steady_clock::now()};
+  // The branches belong to the inlined hash-table insertion, not to a
+  // source-level condition.
+  sessions_.emplace(id, Session{id, std::chrono::steady_clock::now()});  // GCOV_EXCL_BR_LINE
   return id;
 }
 

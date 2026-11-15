@@ -23,6 +23,8 @@
  */
 
 #include <gtest/gtest.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstdint>
@@ -267,4 +269,146 @@ TEST(CacheReaderTest, TxIsNotReplayedWhileDisconnected) {
 }
 
 }  // namespace
+
+/// Minimal BusLink with a real file descriptor so that the poll() paths of
+/// wait_for_activity() can be exercised (MockBusLink has no fd).
+class FdLink : public BusLink {
+public:
+  explicit FdLink(int fd) : fd_(fd) {}
+  [[nodiscard]] bool connect() override { return true; }
+  void disconnect() override {}
+  [[nodiscard]] bool is_connected() const override { return true; }
+  [[nodiscard]] bool send_group_packet(uint16_t, const std::vector<uint8_t>&) override {
+    return true;
+  }
+  [[nodiscard]] bool poll_group_telegram(uint16_t&, std::vector<uint8_t>&) override {
+    return false;
+  }
+  [[nodiscard]] int get_fd() const override { return fd_; }
+  [[nodiscard]] uint64_t get_telegram_count() const override { return 0; }
+  void set_nonblocking(bool) override {}
+  [[nodiscard]] WaitResult wait_for_activity(int) override { return WaitResult::Timeout; }
+  [[nodiscard]] std::string label() const override { return "fd link"; }
+
+private:
+  int fd_;
+};
+
+// ================================================================
+// wait_for_activity(): every wake-up source
+// ================================================================
+
+TEST(CacheReaderWaitTest, PollsOnlyTheLinkWithoutATxQueue) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect("/run/knx"));
+  EXPECT_EQ(detail::wait_for_activity(link, nullptr, 5), detail::Activity::Timeout);
+
+  link.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  EXPECT_EQ(detail::wait_for_activity(link, nullptr, 5), detail::Activity::Data);
+
+  link.disconnect();
+  EXPECT_EQ(detail::wait_for_activity(link, nullptr, 5), detail::Activity::Error);
+}
+
+TEST(CacheReaderWaitTest, TreatsAQueueWithoutEventfdLikeNoQueue) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect("/run/knx"));
+  SharedTxQueue uninitialised;  // eventfd() == -1
+  ASSERT_LT(uninitialised.eventfd(), 0);
+
+  EXPECT_EQ(detail::wait_for_activity(link, &uninitialised, 5), detail::Activity::Timeout);
+  link.enqueue_telegram(0x0A03, {0x00, 0x80, 0x42});
+  EXPECT_EQ(detail::wait_for_activity(link, &uninitialised, 5), detail::Activity::Data);
+  link.disconnect();
+  EXPECT_EQ(detail::wait_for_activity(link, &uninitialised, 5), detail::Activity::Error);
+}
+
+TEST(CacheReaderWaitTest, WakesOnAQueuedTelegramWhenTheLinkHasNoFd) {
+  MockBusLink link;  // get_fd() returns -1
+  ASSERT_TRUE(link.connect("/run/knx"));
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+
+  EXPECT_EQ(detail::wait_for_activity(link, &queue, 5), detail::Activity::Timeout);
+
+  ASSERT_TRUE(queue.push(0x0A03, {0x00, 0x80, 0x42}));
+  queue.signal();
+  EXPECT_EQ(detail::wait_for_activity(link, &queue, 50), detail::Activity::Tx);
+}
+
+TEST(CacheReaderWaitTest, ReportsLinkDataAndErrorsWhenTheLinkHasAnFd) {
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  FdLink link(fds[0]);
+
+  // Nothing to read: only the timeout path remains.
+  EXPECT_EQ(detail::wait_for_activity(link, &queue, 20), detail::Activity::Timeout);
+
+  ASSERT_EQ(::write(fds[1], "x", 1), 1);
+  EXPECT_EQ(detail::wait_for_activity(link, &queue, 100), detail::Activity::Data);
+
+  // Peer closed: poll() reports POLLIN|POLLHUP — the link is gone.
+  ::close(fds[1]);
+  EXPECT_EQ(detail::wait_for_activity(link, &queue, 100), detail::Activity::Error);
+
+  ::close(fds[0]);
+}
+
+// ================================================================
+// Interruptible sleep
+// ================================================================
+
+TEST(CacheReaderSleepTest, SleepsTheFullDurationWithoutAStopPredicate) {
+  const auto start = Clock::now();
+  detail::sleep_interruptible(20, 5, {});
+  EXPECT_GE(ElapsedMs(start), 15);
+}
+
+TEST(CacheReaderSleepTest, ReturnsEarlyWhenStopped) {
+  const auto start = Clock::now();
+  detail::sleep_interruptible(5000, 5, [] { return true; });
+  EXPECT_LT(ElapsedMs(start), 1000);
+}
+
+TEST(CacheReaderTest, DropsTelegramsWhoseApduCannotBeParsed) {
+  MockBusLink link;
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  link.enqueue_telegram(0x0A03, {0x00});  // too short for an APDU
+
+  int iterations = 0;
+  CacheReaderOptions options = FastOptions();
+  // Give the loop enough slices to drain the telegram, then stop.
+  run_cache_reader(link, cache, nullptr, options, [&iterations] { return ++iterations > 150; });
+
+  EXPECT_FALSE(cache.get(0x0A03).has_value());
+}
+
+TEST(CacheReaderStopTest, EmptyPredicateNeverStops) {
+  EXPECT_FALSE(detail::stop_requested({}));
+}
+
+TEST(CacheReaderStopTest, PredicateIsEvaluated) {
+  bool flag = false;
+  EXPECT_FALSE(detail::stop_requested([&flag] { return flag; }));
+  flag = true;
+  EXPECT_TRUE(detail::stop_requested([&flag] { return flag; }));
+}
+
+TEST(CacheReaderTest, RetryWarningsAreRateLimited) {
+  MockBusLink link;
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  link.set_connect_fail_count(1000);  // never connects
+
+  CacheReaderOptions options = FastOptions();
+  options.retry_log_interval_ms = 0;  // never suppress a warning
+  run_cache_reader(link, cache, nullptr, options, [&link] { return link.connect_calls() >= 3; });
+
+  // Several failed attempts happened, each passing the rate limit.
+  EXPECT_GE(link.connect_calls(), 2);
+  EXPECT_FALSE(cache.bus_status().available);
+}
 }  // namespace cvknx

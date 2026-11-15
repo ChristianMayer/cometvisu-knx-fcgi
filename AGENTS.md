@@ -77,7 +77,8 @@ Rules:
 Exclusions are acceptable **only** for code that a test process cannot reach:
 `fork()` children that `_Exit()` before flushing, signal handlers, and
 OS-failure paths that cannot be injected (`socket()`, `mmap()`, `eventfd()`,
-a refused multicast join).  Mark them inline and say why:
+a refused multicast join, `poll()` errors on a valid fd, `EINTR`/`EAGAIN` on a
+few-byte write).  Mark them inline and say why:
 
 ```cpp
 if (fd_ < 0) {  // GCOV_EXCL_BR_LINE - only fails on fd exhaustion
@@ -87,6 +88,34 @@ if (fd_ < 0) {  // GCOV_EXCL_BR_LINE - only fails on fd exhaustion
 
 Supported by the checker: `GCOV_EXCL_LINE`, `GCOV_EXCL_BR_LINE`,
 `GCOV_EXCL_START` / `GCOV_EXCL_STOP`.  Exception-unwind arms are ignored.
+
+**A marker must sit on the line it describes.**  `GCOV_EXCL_LINE` and
+`GCOV_EXCL_BR_LINE` apply to the line that carries the comment; a comment line
+above the code does not exclude anything, so a *statement* marker belongs at the
+end of the statement and a *range* marker (`START`/`STOP`) on its own line
+before the first and after the last line to skip.
+
+The checker also ignores a line whose entire content is closing braces
+(`}`, `});`, `};`).  gcc emits a counter for the exit block of some functions
+even though nothing can execute there — such a line carries no logic, so it is
+neither counted nor expected to be hit.
+
+**Unreachable-by-construction code should be simplified, not excluded.**
+A condition that can never be false (a guard duplicated below its caller, a
+`contains()` check after the loop that adds to the set, an `||` arm with an
+identical operand) is dead weight: delete it, or turn an exhaustive `switch`
+over an enum into an `if` chain so every arm stays reachable.  Exclusions are
+the last resort for what the operating system could do but a test cannot.
+
+## Current coverage state
+
+Everything under `src/` is at 100 % lines and 100 % branches **except** the two
+large legacy files below.  They are recorded in the baseline and must not drop:
+
+| File                     | lines | branches | remaining work                                            |
+|--------------------------|-------|----------|-----------------------------------------------------------|
+| `src/fcgi/fcgi_server.cpp` | 20.8 % | 10.0 %  | needs an FCGI record fault-injection harness            |
+| `src/main.cpp`             | 63.4 % | 43.6 %  | needs a supervisor/worker-pool harness                  |
 
 ## Coding Style
 

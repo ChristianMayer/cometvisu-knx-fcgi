@@ -531,5 +531,207 @@ TEST(TunnelingBusLinkTest, IgnoresUnhandledServiceTypes) {
   EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
 }
 
+TEST(TunnelingBusLinkTest, PollOnUnconnectedLinkReturnsFalse) {
+  TunnelingBusLink link(LoopbackOptions(3671));
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+}
+
+TEST(TunnelingBusLinkTest, IgnoresMalformedTunnellingRequest) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  // Structure length != 0x04: the frame parses but the body is invalid.
+  router.reply(knxnetip::build_frame(ServiceType::TunnellingRequest,
+                                     Bytes{0x03, kChannel, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Timeout);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, PollAfterDeviceDisconnectReturnsFalse) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(knxnetip::build_disconnect_request(kChannel, Hpai{0U, 0U}));
+  ASSERT_EQ(link.wait_for_activity(100), BusLink::WaitResult::Error);
+
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+}
+
+TEST(TunnelingBusLinkTest, OverdueHeartbeatWithZeroTimeoutDoesNotBlock) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.heartbeat_sec = 1;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  // Wait past the heartbeat deadline; the next call has no time left.
+  EXPECT_EQ(link.wait_for_activity(1200), BusLink::WaitResult::Timeout);
+  Bytes heartbeat;
+  ASSERT_TRUE(router.receive(heartbeat));
+
+  EXPECT_EQ(link.wait_for_activity(0), BusLink::WaitResult::Timeout);
+}
+
+TEST(TunnelingBusLinkTest, NegativeTimeoutIsClampedToZero) {
+  TunnelingBusLink link(LoopbackOptions(3671));
+  // No socket: the call must return immediately, never block.
+  EXPECT_EQ(link.wait_for_activity(-1), BusLink::WaitResult::Error);
+}
+
+TEST(TunnelingBusLinkTest, ExposesChannelAndSequence) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  EXPECT_EQ(link.channel(), 0);
+  ASSERT_TRUE(ConnectWithRouter(link, router, 0x42));
+  EXPECT_EQ(link.channel(), 0x42);
+  EXPECT_EQ(link.next_sequence(), 0);
+}
+
+TEST(TunnelingBusLinkTest, NatModeConnects) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.nat = true;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, SetNonblockingTogglesBothWays) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  link.set_nonblocking(false);
+  link.set_nonblocking(true);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, PollReturnsOnlyQueuedTelegrams) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 0, IndicationCemi(0x0A03, {0x00, 0x80, 0x01})));
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  ASSERT_TRUE(link.poll_group_telegram(addr, apdu));
+  // Nothing queued any more: no second delivery of the same telegram.
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+}
+
+TEST(TunnelingBusLinkTest, OverdueHeartbeatWithNegativeTimeoutIsClamped) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.heartbeat_sec = 1;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  EXPECT_EQ(link.wait_for_activity(1100), BusLink::WaitResult::Timeout);
+  Bytes heartbeat;
+  ASSERT_TRUE(router.receive(heartbeat));
+  // A negative timeout must not block and must not underflow the poll slice.
+  EXPECT_EQ(link.wait_for_activity(-1), BusLink::WaitResult::Timeout);
+}
+
+TEST(TunnelingBusLinkTest, IgnoresMalformedAckAndStateResponse) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  // Malformed TUNNELLING_ACK (structure length != 0x04) and malformed
+  // CONNECTIONSTATE_RESPONSE (too short) must be ignored, not fatal.
+  router.reply(
+      knxnetip::build_frame(ServiceType::TunnellingAck, Bytes{0x03, kChannel, 0x00, 0x00, 0x00}));
+  router.reply(knxnetip::build_frame(ServiceType::ConnectionStateResponse, Bytes{0x01}));
+  EXPECT_EQ(link.wait_for_activity(150), BusLink::WaitResult::Timeout);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, HealthyHeartbeatResponseKeepsTheTunnel) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(ConnectionStateResponse(kChannel, 0x00));
+  EXPECT_EQ(link.wait_for_activity(150), BusLink::WaitResult::Timeout);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, WaitAfterDeviceDisconnectReturnsError) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(knxnetip::build_disconnect_request(kChannel, Hpai{0U, 0U}));
+  EXPECT_EQ(link.wait_for_activity(150), BusLink::WaitResult::Error);
+  // A second call must keep reporting the error without blocking.
+  EXPECT_EQ(link.wait_for_activity(1), BusLink::WaitResult::Error);
+}
+
+TEST(TunnelingBusLinkTest, ReportsFdAndTelegramCount) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  EXPECT_EQ(link.get_fd(), -1);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  EXPECT_GE(link.get_fd(), 0);
+  EXPECT_EQ(link.get_telegram_count(), 0U);
+}
+
 }  // namespace
+
+TEST(TunnelingBusLinkTest, WaitReportsGroupDataForAQueuedIndication) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 0, IndicationCemi(0x0A03, {0x00, 0x80, 0x42})));
+  EXPECT_EQ(link.wait_for_activity(500), BusLink::WaitResult::GroupData);
+
+  std::uint16_t group = 0;
+  Bytes apdu;
+  ASSERT_TRUE(link.poll_group_telegram(group, apdu));
+  EXPECT_EQ(group, 0x0A03);
+}
+
+TEST(TunnelingBusLinkTest, DrainsQueuedIndicationsWithoutANewWait) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 0, IndicationCemi(0x0A03, {0x00, 0x80, 0x01})));
+  // A distinct sequence number: an out-of-sequence frame is acknowledged and dropped.
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 1, IndicationCemi(0x0A04, {0x00, 0x80, 0x02})));
+  EXPECT_EQ(link.wait_for_activity(500), BusLink::WaitResult::GroupData);
+
+  std::uint16_t group = 0;
+  Bytes apdu;
+  ASSERT_TRUE(link.poll_group_telegram(group, apdu));
+  EXPECT_EQ(group, 0x0A03);
+  // The second indication is still in the socket buffer and is read here.
+  ASSERT_TRUE(link.poll_group_telegram(group, apdu));
+  EXPECT_EQ(group, 0x0A04);
+  EXPECT_FALSE(link.poll_group_telegram(group, apdu));
+}
+
+TEST(TunnelingBusLinkTest, IgnoresATruncatedConnectionStateResponse) {
+  FakeRouter router;
+  TunnelingBusLink link(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  // Only the channel, no status byte: the datagram cannot be parsed and must
+  // be dropped without touching the connection state.
+  router.reply(knxnetip::build_frame(ServiceType::ConnectionStateResponse, Bytes{0x21}));
+  std::uint16_t group = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(group, apdu));
+  EXPECT_TRUE(link.is_connected());
+}
 }  // namespace cvknx

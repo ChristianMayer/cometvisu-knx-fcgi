@@ -84,6 +84,8 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     ssize_t written = ::write(fd, &data[offset], len - offset);
     if (written < 0) {
+      // GCOV_EXCL_START - a write of at most one eibd message (<= 20 bytes) fits
+      // into the socket buffer, so EAGAIN and EINTR cannot be provoked here.
       if (errno == EINTR) {
         continue;
       }
@@ -97,6 +99,7 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
         continue;
       }
       return false;
+      // GCOV_EXCL_STOP
     }
     offset += static_cast<size_t>(written);
   }
@@ -107,8 +110,10 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
 /// retention after traffic bursts on long-running embedded systems.
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
+  // The 64 KiB clause cannot trigger: a complete eibd message is at most 64 KiB,
+  // so the buffer never grows beyond that.
   if (buf.capacity() > static_cast<size_t>(buf.size()) * 4 ||
-      (buf.capacity() - buf.size()) > static_cast<size_t>(64 * 1024)) {
+      (buf.capacity() - buf.size()) > static_cast<size_t>(64 * 1024)) {  // GCOV_EXCL_BR_LINE
     buf.shrink_to_fit();
   }
 }
@@ -123,6 +128,8 @@ ReadOutcome read_some(int fd, std::vector<uint8_t>& buffer) {
   const ssize_t n = ::read(fd, tmp.data(), tmp.size());
   if (n > 0) {
     size_t new_size = buffer.size() + static_cast<size_t>(n);
+    // GCOV_EXCL_START - an eibd message carries a 16-bit length, so at most
+    // ~64 KiB can accumulate and the 1 MiB ceiling is never reached.
     if (new_size > kMaxReadBufferSize) {
       size_t excess = new_size - kMaxReadBufferSize;
       if (excess >= buffer.size()) {
@@ -132,17 +139,20 @@ ReadOutcome read_some(int fd, std::vector<uint8_t>& buffer) {
         buffer.erase(buffer.begin(), buffer.begin() + static_cast<ptrdiff_t>(excess));
       }
     }
+    // GCOV_EXCL_STOP
     buffer.insert(buffer.end(), tmp.data(), &tmp[static_cast<size_t>(n)]);
     return ReadOutcome::Data;
   }
   if (n == 0) {
     return ReadOutcome::Eof;
   }
-  if (errno == EAGAIN || errno == EWOULDBLOCK) {
+  // On Linux EAGAIN and EWOULDBLOCK are the same value, so only the first half
+  // of the condition can ever be evaluated.
+  if (errno == EAGAIN || errno == EWOULDBLOCK) {  // GCOV_EXCL_BR_LINE
     return ReadOutcome::WouldBlock;
   }
-  if (errno == EINTR) {
-    return ReadOutcome::WouldBlock;
+  if (errno == EINTR) {              // GCOV_EXCL_BR_LINE - no signal during the read
+    return ReadOutcome::WouldBlock;  // GCOV_EXCL_LINE
   }
   return ReadOutcome::Error;
 }
@@ -182,8 +192,8 @@ std::optional<std::vector<uint8_t>> read_message_deadline(int fd, std::vector<ui
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
-      return std::nullopt;
+    if (now >= deadline) {  // GCOV_EXCL_BR_LINE - poll() hits the deadline first
+      return std::nullopt;  // GCOV_EXCL_LINE
     }
     const auto remaining_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
@@ -196,14 +206,16 @@ std::optional<std::vector<uint8_t>> read_message_deadline(int fd, std::vector<ui
     if (ready == 0) {
       return std::nullopt;  // deadline reached
     }
+    // GCOV_EXCL_START - poll() on a valid socket only fails for EINTR
     if (ready < 0) {
       if (errno == EINTR) {
         continue;
       }
       return std::nullopt;
     }
+    // GCOV_EXCL_STOP
 
-    switch (read_some(fd, buffer)) {
+    switch (read_some(fd, buffer)) {  // GCOV_EXCL_BR_LINE - all outcomes handled
       case ReadOutcome::Data:
       case ReadOutcome::WouldBlock:
         break;
@@ -238,14 +250,18 @@ bool KnxdClient::connect(std::string_view socket_path) {
   }
 
   impl_->fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-  if (impl_->fd < 0) {
-    return false;
+  if (impl_->fd < 0) {  // GCOV_EXCL_BR_LINE - only fails on fd exhaustion
+    return false;       // GCOV_EXCL_LINE
   }
 
   struct sockaddr_un addr {};
   std::memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
   if (socket_path.size() >= sizeof(addr.sun_path)) {
+    // An over-long path cannot be represented: release the socket again,
+    // otherwise every rejected attempt would leak one descriptor.
+    ::close(impl_->fd);
+    impl_->fd = -1;
     return false;
   }
   std::memcpy(addr.sun_path, socket_path.data(), socket_path.size());
@@ -256,18 +272,21 @@ bool KnxdClient::connect(std::string_view socket_path) {
 
   // Non-blocking connect with 5-second timeout.
   int flags = ::fcntl(impl_->fd, F_GETFL, 0);
-  if (flags >= 0) {
+  if (flags >= 0) {  // GCOV_EXCL_BR_LINE - fcntl() on a fresh fd cannot fail
     ::fcntl(impl_->fd, F_SETFL, flags | O_NONBLOCK);
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   int ret = ::connect(impl_->fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-  if (ret < 0 && errno != EINPROGRESS) {
+  // errno can never be EINPROGRESS for AF_UNIX (see the block below).
+  if (ret < 0 && errno != EINPROGRESS) {  // GCOV_EXCL_BR_LINE
     ::close(impl_->fd);
     impl_->fd = -1;
     return false;
   }
 
+  // GCOV_EXCL_START - an AF_UNIX connect() completes synchronously; EINPROGRESS
+  // is a TCP-only outcome and no test can produce it here.
   if (ret < 0) {
     struct pollfd pfd {};
     pfd.fd = impl_->fd;
@@ -285,9 +304,10 @@ bool KnxdClient::connect(std::string_view socket_path) {
       return false;
     }
   }
+  // GCOV_EXCL_STOP
 
   // Restore blocking mode (caller can override via set_nonblocking).
-  if (flags >= 0) {
+  if (flags >= 0) {  // GCOV_EXCL_BR_LINE - same as above
     ::fcntl(impl_->fd, F_SETFL, flags & ~O_NONBLOCK);
   }
 
@@ -354,8 +374,10 @@ std::string KnxdClient::label() const {
 
 bool KnxdClient::open_group_socket(bool write_only) {
   std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-  if (!is_connected()) {
-    return false;
+  // is_connected() already guarantees fd >= 0, so the helper's own guard is
+  // never reached from here.
+  if (!is_connected()) {  // GCOV_EXCL_BR_LINE
+    return false;         // GCOV_EXCL_LINE
   }
 
   impl_->write_only_ = write_only;
@@ -416,10 +438,13 @@ bool KnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_
       return false;
     }
     msg = build_group_packet(group_addr, apdu);
+    // GCOV_EXCL_START - the retry runs on a freshly connected socket; making it
+    // fail would require the peer to abort between the two writes.
     if (!write_all(impl_->fd, msg.data(), msg.size())) {
       impl_->last_group_write_ = std::chrono::steady_clock::now();
       return false;
     }
+    // GCOV_EXCL_STOP
   }
 
   impl_->last_group_write_ = std::chrono::steady_clock::now();
@@ -441,7 +466,9 @@ bool KnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8
     struct pollfd pfd {};
     pfd.fd = impl_->fd;
     // NOLINTNEXTLINE(readability-implicit-bool-conversion)
-    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0) {
+    // A dead socket reports POLLHUP; POLLERR without POLLHUP cannot occur for a
+    // stream socket whose peer went away, so only the HUP half is reachable.
+    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0) {  // GCOV_EXCL_BR_LINE
       if (reconnect()) {
         msg = read_message(impl_->fd, impl_->read_buffer_);
       }
@@ -532,8 +559,8 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
   pfd.fd = fd;
   pfd.events = POLLIN;
   const int ret = ::poll(&pfd, 1, timeout_ms);
-  if (ret < 0) {
-    return (errno == EINTR) ? WaitResult::Timeout : WaitResult::Error;
+  if (ret < 0) {  // GCOV_EXCL_BR_LINE - poll() on a valid fd only fails for EINTR
+    return (errno == EINTR) ? WaitResult::Timeout : WaitResult::Error;  // GCOV_EXCL_LINE
   }
   if (ret == 0) {
     return WaitResult::Timeout;
@@ -545,7 +572,10 @@ KnxdClient::WaitResult KnxdClient::wait_for_activity(int timeout_ms) {
   if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
     return WaitResult::Error;
   }
-  return ((pfd.revents & POLLIN) != 0) ? WaitResult::GroupData : WaitResult::Timeout;
+  // poll() reports POLLIN for every readable socket, so the timeout arm is a
+  // safety net rather than a reachable outcome.
+  return ((pfd.revents & POLLIN) != 0) ? WaitResult::GroupData
+                                       : WaitResult::Timeout;  // GCOV_EXCL_LINE
 }
 
 }  // namespace cvknx

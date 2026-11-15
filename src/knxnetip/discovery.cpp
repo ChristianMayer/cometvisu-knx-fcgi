@@ -56,8 +56,8 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
   }
 
   const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) {
-    return devices;
+  if (fd < 0) {      // GCOV_EXCL_BR_LINE - only fails on fd exhaustion
+    return devices;  // GCOV_EXCL_LINE
   }
   int enable = 1;
   (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
@@ -93,14 +93,14 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
   const auto request = knxnetip::build_search_request(knxnetip::Hpai{0U, 0U});
   if (::sendto(fd, request.data(), request.size(), 0,
                reinterpret_cast<const struct sockaddr*>(&destination),
-               sizeof(destination)) != static_cast<ssize_t>(request.size())) {
+               sizeof(destination)) != static_cast<ssize_t>(request.size())) {  // GCOV_EXCL_BR_LINE
     // A local sendto() on a freshly bound socket does not fail in practice.
     ::close(fd);     // GCOV_EXCL_LINE
     return devices;  // GCOV_EXCL_LINE
   }
 
   const std::int64_t deadline = now_ms() + std::max(1, options.timeout_ms);
-  while (now_ms() < deadline) {
+  while (now_ms() < deadline) {  // GCOV_EXCL_BR_LINE - every exit goes through break
     struct pollfd pfd {};
     pfd.fd = fd;
     pfd.events = POLLIN;
@@ -130,7 +130,10 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
     device.port = response->endpoint.port;
     // One entry per endpoint, even when a router answers on several interfaces.
     const bool known = std::any_of(devices.begin(), devices.end(), [&device](const auto& entry) {
-      return entry.address == device.address && entry.port == device.port;
+      if (entry.address != device.address) {
+        return false;
+      }
+      return entry.port == device.port;
     });
     if (!known) {
       devices.push_back(device);

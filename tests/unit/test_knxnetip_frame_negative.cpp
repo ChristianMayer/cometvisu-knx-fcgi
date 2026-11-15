@@ -168,5 +168,67 @@ TEST(FrameNegative, EmptyBodyFrameRoundTrips) {
   EXPECT_TRUE(parsed->body.empty());
 }
 
+TEST(FrameNegative, HpaiRejectsWrongLengthByte) {
+  Bytes hpai = encode_hpai(Hpai{0xC0A80101U, 3671});
+  hpai[0] = 0x07;
+  EXPECT_FALSE(parse_hpai(hpai.data(), hpai.size()).has_value());
+}
+
+TEST(FrameNegative, SearchResponseRejectsBadSecondHpai) {
+  Bytes body;
+  const auto good = encode_hpai(Hpai{0xC0A8010AU, 3671});
+  auto bad = good;
+  bad[1] = 0x02;  // IPv4/TCP — not supported
+  body.insert(body.end(), good.begin(), good.end());
+  body.insert(body.end(), bad.begin(), bad.end());
+
+  const auto frame = build_frame(ServiceType::SearchResponse, body);
+  EXPECT_FALSE(parse_search_response(frame).has_value());
+}
+
+TEST(FrameNegative, EveryParserRejectsAnUnparsableFrame) {
+  const Bytes garbage = {0x01, 0x02, 0x03};
+  EXPECT_FALSE(parse_connect_response(garbage).has_value());
+  EXPECT_FALSE(parse_tunnelling_request(garbage).has_value());
+  EXPECT_FALSE(parse_tunnelling_ack(garbage).has_value());
+  EXPECT_FALSE(parse_routing_indication(garbage).has_value());
+  EXPECT_FALSE(parse_search_response(garbage).has_value());
+  EXPECT_FALSE(parse_status_response(garbage, ServiceType::DisconnectResponse).has_value());
+}
+
+TEST(FrameNegative, SearchResponseRejectsDibLongerThanTheFrame) {
+  Bytes body;
+  const auto hpai = encode_hpai(Hpai{0xC0A8010AU, 3671});
+  body.insert(body.end(), hpai.begin(), hpai.end());
+  body.insert(body.end(), hpai.begin(), hpai.end());
+  body.push_back(0xF0);  // claims 240 bytes, only 2 follow
+  body.push_back(0x01);
+  body.push_back(0x00);
+  body.push_back(0x00);
+
+  const auto frame = build_frame(ServiceType::SearchResponse, body);
+  const auto parsed = parse_search_response(frame);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_TRUE(parsed->device_name.empty());
+}
+
+TEST(FrameNegative, SearchResponseSkipsShortDeviceInfoDib) {
+  Bytes body;
+  const auto hpai = encode_hpai(Hpai{0xC0A8010AU, 3671});
+  body.insert(body.end(), hpai.begin(), hpai.end());
+  body.insert(body.end(), hpai.begin(), hpai.end());
+  // Device-info DIB type but only 20 bytes long: skipped, not parsed.
+  Bytes dib(20, 0x00);
+  dib[0] = 20;
+  dib[1] = 0x01;
+  body.insert(body.end(), dib.begin(), dib.end());
+
+  const auto frame = build_frame(ServiceType::SearchResponse, body);
+  const auto parsed = parse_search_response(frame);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_TRUE(parsed->device_name.empty());
+  EXPECT_EQ(parsed->individual_address, 0);
+}
+
 }  // namespace
 }  // namespace cvknx::knxnetip

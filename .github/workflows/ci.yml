@@ -91,7 +91,11 @@ jobs:
   coverage:
     # Coverage is measured on every pull request (and on main, so the baseline
     # cannot silently drift).  gcc only: the gate reads gcov counters.
-    runs-on: ubuntu-latest
+    #
+    # Pinned to 24.04 so the gcc release matches the one the baseline was
+    # recorded with — branch arm counts differ between gcc versions.  The gate
+    # additionally allows a small tolerance for baselined files.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     env:
@@ -139,6 +143,7 @@ jobs:
           python3 tools/check_coverage.py \
               --build-dir ${{ env.COVERAGE_BUILD_DIR }} \
               --baseline tools/coverage-baseline.json \
+              --tolerance 1 \
               --report > coverage-report.txt 2>&1
           status=$?
           {
@@ -156,6 +161,7 @@ jobs:
             python3 tools/check_coverage.py \
                 --build-dir ${{ env.COVERAGE_BUILD_DIR }} \
                 --baseline tools/coverage-baseline.json \
+                --tolerance 1 \
                 --list-uncovered > coverage-gaps.txt 2>&1
             {
               echo '### Uncovered code'
@@ -177,3 +183,4 @@ jobs:
             coverage-gaps.txt
           if-no-files-found: ignore
           retention-days: 14
+

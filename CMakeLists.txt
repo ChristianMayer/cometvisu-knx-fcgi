@@ -212,6 +212,8 @@ if(ENABLE_COVERAGE)
     # worker processes that all write the same .gcda files.
     add_compile_options(--coverage -O0 -g -fprofile-update=atomic)
     add_link_options(--coverage)
+    # Lets forked children flush their counters before std::_Exit().
+    add_compile_definitions(KNX_COVERAGE=1)
     message(STATUS "Coverage instrumentation enabled (gcov)")
 endif()
 

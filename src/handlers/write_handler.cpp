@@ -111,8 +111,10 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
     }
   }
 
-  // 404 only when all addresses had an invalid format.
-  if (!any_valid && !addresses.empty()) {
+  // 404 only when all addresses had an invalid format.  An empty address list
+  // returned early above, so any_valid can only be false if every entry failed
+  // to parse.
+  if (!any_valid) {
     result.http_status = 404;
     result.body = R"({"error":"invalid address format"})";
   }

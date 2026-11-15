@@ -137,3 +137,12 @@ TEST(SessionStoreTest, MaxSessionsPreservesAnonymous) {
   EXPECT_TRUE(store.is_valid("0"));
   EXPECT_TRUE(store.is_valid(id1));
 }
+
+TEST(SessionStoreTest, CleanupRemovesExpiredSessions) {
+  SessionStore store(/*session_ttl_sec=*/0);
+  const std::string id = store.create_session();
+  EXPECT_EQ(store.count(), 1U);
+  store.cleanup_expired();
+  EXPECT_EQ(store.count(), 0U);
+  EXPECT_FALSE(store.is_valid(id));
+}

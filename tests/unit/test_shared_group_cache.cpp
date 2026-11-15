@@ -14,6 +14,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <gtest/gtest.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <thread>
 
@@ -528,4 +530,101 @@ TEST_F(SharedGroupCacheTest, ReconnectingClearsTheOutage) {
   EXPECT_TRUE(status.available);
   EXPECT_EQ(status.last_ok, 2000U);
   EXPECT_EQ(status.down_since, 0U);
+}
+
+// ================================================================
+// Lifecycle, degenerate state and recovery paths
+// ================================================================
+
+TEST(SharedCacheLifecycle, UninitialisedCacheIsInert) {
+  SharedGroupCache cache;
+  EXPECT_FALSE(cache.is_initialized());
+  EXPECT_EQ(cache.data(), nullptr);
+
+  // Every accessor must tolerate the "not created yet" state.
+  cache.push(0x0A03, {0x42});
+  EXPECT_FALSE(cache.get(0x0A03).has_value());
+  const auto delta = cache.get_delta(0, {0x0A03});
+  EXPECT_TRUE(delta.values.empty());
+  EXPECT_EQ(delta.position, 0U);
+  EXPECT_FALSE(cache.wait_for_new_data(1));
+  cache.notify_all();
+  cache.publish_bus_status(false);
+  const auto status = cache.bus_status();
+  EXPECT_TRUE(status.available);
+  EXPECT_EQ(status.last_ok, 0U);
+  EXPECT_EQ(status.down_since, 0U);
+}
+
+TEST(SharedCacheLifecycle, CreateIsIdempotent) {
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  EXPECT_TRUE(cache.is_initialized());
+  EXPECT_FALSE(cache.create());  // already created
+}
+
+TEST(SharedCacheLifecycle, AttachedInstanceDoesNotUnmapTheRegion) {
+  SharedGroupCache owner;
+  ASSERT_TRUE(owner.create());
+  {
+    SharedGroupCache attached;
+    attached.attach(owner.data());
+    EXPECT_TRUE(attached.is_initialized());
+    attached.push(0x0A03, {0x42});
+    EXPECT_TRUE(attached.get(0x0A03).has_value());
+  }  // attached must not unmap the shared region
+  const auto value = owner.get(0x0A03);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ((*value)[0], 0x42);
+}
+
+TEST_F(SharedGroupCacheTest, FullTableDropsFurtherAddresses) {
+  // Fill every slot with a distinct address.
+  for (size_t i = 0; i < kSharedCacheCapacity; ++i) {
+    cache_.push(static_cast<uint16_t>(0x1000 + i), {0x01});
+  }
+  // The table is full: a new address cannot be stored ...
+  cache_.push(0x2000, {0x02});
+  EXPECT_FALSE(cache_.get(0x2000).has_value());
+  // ... while every stored address is still readable.
+  EXPECT_TRUE(cache_.get(0x1000).has_value());
+  // A delta query for the dropped address finds no slot either.
+  const auto delta = cache_.get_delta(0, {0x2000});
+  EXPECT_TRUE(delta.values.empty());
+}
+
+TEST_F(SharedGroupCacheTest, DeltaSkipsEntriesAheadOfTheCurrentPosition) {
+  cache_.push(0x0A03, {0x42});
+  // Simulate a wrap: the entry's pushed_at is now ahead of the position.
+  cache_.data()->position.store(0);
+  const auto delta = cache_.get_delta(0, {0x0A03});
+  EXPECT_TRUE(delta.values.empty());
+}
+
+TEST_F(SharedGroupCacheTest, OwnerDeathIsRecoveredByEveryAccessor) {
+  // A process that dies while holding the robust mutex leaves it inconsistent;
+  // the next locker gets EOWNERDEAD and must make it consistent again.
+  const auto kill_owner = [this]() {
+    const pid_t pid = ::fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+      ::pthread_mutex_lock(&cache_.data()->mutex);
+      ::_Exit(0);  // never unlock, never flush coverage data
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(pid, &status, 0), pid);
+  };
+
+  kill_owner();
+  cache_.push(0x0A03, {0x42});
+
+  kill_owner();
+  EXPECT_TRUE(cache_.get(0x0A03).has_value());
+
+  kill_owner();
+  const auto delta = cache_.get_delta(0, {0x0A03});
+  EXPECT_EQ(delta.values.size(), 1U);
+
+  kill_owner();
+  (void)cache_.wait_for_new_data(0);
 }

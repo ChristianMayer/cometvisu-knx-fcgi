@@ -1,34 +1,34 @@
 {
   "src/bus/bus_config.cpp": {
-    "branch": 96.129,
-    "line": 99.1453
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/bus/bus_config.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/bus/bus_connector.cpp": {
-    "branch": 96.6667,
+    "branch": 100.0,
     "line": 100.0
   },
   "src/bus/bus_factory.cpp": {
-    "branch": 88.8889,
-    "line": 72.7273
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/bus/bus_link.h": {
     "branch": 100.0,
-    "line": 58.5366
+    "line": 100.0
   },
   "src/bus/shared_tx_bus_link.cpp": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/bus/shared_tx_bus_link.h": {
-    "branch": 50.0,
-    "line": 55.0
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/fcgi/fcgi_request.cpp": {
-    "branch": 82.1429,
+    "branch": 100.0,
     "line": 100.0
   },
   "src/fcgi/fcgi_request.h": {
@@ -36,55 +36,55 @@
     "line": 100.0
   },
   "src/fcgi/fcgi_server.cpp": {
-    "branch": 7.1066,
-    "line": 18.3036
+    "branch": 10.0,
+    "line": 20.7729
   },
   "src/handlers/knxd_status_json.cpp": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/handlers/login_handler.cpp": {
-    "branch": 71.0145,
-    "line": 91.1111
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/handlers/login_handler.h": {
     "branch": 100.0,
-    "line": 60.0
+    "line": 100.0
   },
   "src/handlers/read_handler.cpp": {
-    "branch": 91.6031,
-    "line": 97.6562
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/handlers/read_handler.h": {
     "branch": 100.0,
-    "line": 60.0
+    "line": 100.0
   },
   "src/handlers/write_handler.cpp": {
-    "branch": 95.3125,
+    "branch": 100.0,
     "line": 100.0
   },
   "src/handlers/write_handler.h": {
     "branch": 100.0,
-    "line": 75.0
+    "line": 100.0
   },
   "src/knxd/cache_reader.cpp": {
-    "branch": 88.4615,
-    "line": 92.0863
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxd/cache_reader.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/knxd/knxd_client.cpp": {
-    "branch": 28.1369,
-    "line": 43.5374
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxd/knxd_protocol.cpp": {
-    "branch": 89.6552,
-    "line": 95.0
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxd/knxd_protocol.h": {
-    "branch": 66.6667,
+    "branch": 100.0,
     "line": 100.0
   },
   "src/knxnetip/cemi.cpp": {
@@ -96,83 +96,83 @@
     "line": 100.0
   },
   "src/knxnetip/discovery.cpp": {
-    "branch": 71.7391,
-    "line": 85.0746
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxnetip/discovery.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/knxnetip/knxnetip_frame.cpp": {
-    "branch": 93.8202,
-    "line": 98.7342
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxnetip/knxnetip_frame.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/knxnetip/routing_bus_link.cpp": {
-    "branch": 80.2083,
-    "line": 90.8397
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxnetip/routing_bus_link.h": {
     "branch": 100.0,
-    "line": 62.5
+    "line": 100.0
   },
   "src/knxnetip/tunneling_bus_link.cpp": {
-    "branch": 85.7143,
-    "line": 92.5795
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/knxnetip/tunneling_bus_link.h": {
-    "branch": 50.0,
-    "line": 57.1429
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/main.cpp": {
-    "branch": 43.4874,
-    "line": 61.9355
+    "branch": 43.5789,
+    "line": 63.3663
   },
   "src/router/router.cpp": {
     "branch": 100.0,
-    "line": 95.8333
+    "line": 100.0
   },
   "src/router/router.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/state/group_cache.cpp": {
-    "branch": 88.3721,
-    "line": 93.3333
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/state/group_cache.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/state/session_store.cpp": {
-    "branch": 93.3333,
-    "line": 96.8254
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/state/session_store.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/state/shared_group_cache.cpp": {
-    "branch": 72.381,
-    "line": 83.6957
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/state/shared_group_cache.h": {
     "branch": 100.0,
-    "line": 92.8571
+    "line": 100.0
   },
   "src/state/shared_tx_queue.cpp": {
-    "branch": 92.5926,
-    "line": 93.6937
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/state/shared_tx_queue.h": {
     "branch": 100.0,
-    "line": 90.0
+    "line": 100.0
   },
   "src/util/debug_log.cpp": {
-    "branch": 92.8571,
+    "branch": 100.0,
     "line": 100.0
   },
   "src/util/debug_log.h": {
@@ -184,20 +184,20 @@
     "line": 100.0
   },
   "src/util/hex.cpp": {
-    "branch": 85.1852,
-    "line": 93.75
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/util/json_builder.cpp": {
-    "branch": 71.4286,
-    "line": 78.6667
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/util/json_builder.h": {
     "branch": 100.0,
     "line": 100.0
   },
   "src/util/query_string.cpp": {
-    "branch": 81.1765,
-    "line": 91.8919
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/util/query_string.h": {
     "branch": 100.0,

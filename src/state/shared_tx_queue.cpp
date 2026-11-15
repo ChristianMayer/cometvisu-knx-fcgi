@@ -31,7 +31,7 @@
 namespace cvknx {
 
 SharedTxQueue::~SharedTxQueue() {
-  if (eventfd_ >= 0 && owns_eventfd_) {
+  if (eventfd_ >= 0 && owns_eventfd_) {  // GCOV_EXCL_BR_LINE - fd and ownership are set together
     ::close(eventfd_);
     eventfd_ = -1;
   }
@@ -50,9 +50,11 @@ bool SharedTxQueue::create() {
 
   void* region = ::mmap(nullptr, sizeof(SharedTxQueueData), PROT_READ | PROT_WRITE,
                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  // GCOV_EXCL_START - allocation failures cannot be injected portably
   if (region == MAP_FAILED) {
     return false;
   }
+  // GCOV_EXCL_STOP
 
   auto* data = new (region) SharedTxQueueData{};
 
@@ -61,21 +63,25 @@ bool SharedTxQueue::create() {
   ::pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
   // Robust: a worker that dies while holding the lock must not wedge the queue.
   ::pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+  // GCOV_EXCL_START - pthread_mutex_init only fails on resource exhaustion
   if (::pthread_mutex_init(&data->mutex, &attr) != 0) {
     ::pthread_mutexattr_destroy(&attr);
     ::munmap(region, sizeof(SharedTxQueueData));
     return false;
   }
+  // GCOV_EXCL_STOP
   ::pthread_mutexattr_destroy(&attr);
 
   // Created before fork(): every child inherits the same descriptor, so a
   // worker's write() wakes the cache reader's poll().
   eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  // GCOV_EXCL_START - eventfd() only fails on fd exhaustion
   if (eventfd_ < 0) {
     ::pthread_mutex_destroy(&data->mutex);
     ::munmap(region, sizeof(SharedTxQueueData));
     return false;
   }
+  // GCOV_EXCL_STOP
 
   owns_eventfd_ = true;
   data_ = data;

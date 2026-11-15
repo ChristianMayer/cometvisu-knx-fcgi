@@ -38,17 +38,11 @@ std::vector<uint8_t> hex_decode(std::string_view hex) {
         std::isxdigit(static_cast<unsigned char>(lo)) == 0) {
       return {};
     }
+    // isxdigit() above guarantees [0-9a-fA-F], so folding the case and
+    // comparing against '9' covers every valid input with a single choice.
     auto nibble = [](char c) -> uint8_t {
-      if (c >= '0' && c <= '9') {
-        return static_cast<uint8_t>(c - '0');
-      }
-      if (c >= 'a' && c <= 'f') {
-        return static_cast<uint8_t>(c - 'a' + 10);
-      }
-      if (c >= 'A' && c <= 'F') {
-        return static_cast<uint8_t>(c - 'A' + 10);
-      }
-      return 0;
+      const auto lowered = static_cast<uint8_t>(std::tolower(static_cast<unsigned char>(c)));
+      return static_cast<uint8_t>(lowered <= '9' ? lowered - '0' : lowered - 'a' + 10);
     };
     result.push_back(static_cast<uint8_t>((nibble(hi) << 4) | nibble(lo)));
   }

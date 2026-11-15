@@ -155,10 +155,12 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     return result;
   }
 
-  auto addr_key = [](uint16_t a) -> std::string {
-    return KnxAddress{.ns = std::string{KnxAddress::get_default_namespace()},
-                      .group = KnxGroupAddress::from_eibaddr(a)}
-        .to_cometvisu();
+  // GCOV_EXCL_BR_LINE - the branches on the next line come from the inlined
+  // std::string member of KnxAddress, not from a source-level condition.
+  const auto addr_key = [](uint16_t a) -> std::string {
+    KnxAddress address;
+    address.group = KnxGroupAddress::from_eibaddr(a);
+    return address.to_cometvisu();
   };
 
   JsonBuilder json;
@@ -239,12 +241,12 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     // return new data.  Age filtering is an additional constraint per spec.
     auto delta = cache_.get_delta(lastpos, eib_addrs, max_age_sec);
 
+    // already_written is empty here: as soon as it holds anything the loop is
+    // left above, so no duplicate check is needed.
     for (const auto& [addr, val] : delta.values) {
-      if (!already_written.contains(addr)) {
-        json.add_string(addr_key(addr), hex_encode(val.data(), val.size()));
-        already_written.insert(addr);
-        written = true;
-      }
+      json.add_string(addr_key(addr), hex_encode(val.data(), val.size()));
+      already_written.insert(addr);
+      written = true;
     }
 
     // Position comes from the shared cache — single source of truth,

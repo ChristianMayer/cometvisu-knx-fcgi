@@ -37,14 +37,10 @@
 #include "util/hex.h"
 
 namespace cvknx {
-namespace {
+namespace {}  // namespace
 
-/// Minimum interval between two "knxd unreachable" log lines.  knxd may be
-/// gone for days; logging every attempt would flood the container log.
-inline constexpr int kRetryLogIntervalMs = 30000;
+namespace detail {
 
-/// Sleep for @p duration_ms, but wake up early when should_stop() becomes true.
-/// Sleeps in slices so a shutdown never waits for a full backoff period.
 void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool()>& should_stop) {
   const int slice = std::max(1, slice_ms);
   int remaining = duration_ms;
@@ -61,6 +57,14 @@ void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool
     remaining -= chunk;
   }
 }
+
+bool stop_requested(const std::function<bool()>& should_stop) {
+  return static_cast<bool>(should_stop) && should_stop();
+}
+
+}  // namespace detail
+
+namespace {
 
 /// Push every pending group telegram into the shared cache.
 /// @return number of telegrams that were pushed.
@@ -82,8 +86,9 @@ int drain_telegrams(BusLink& link, SharedGroupCache& cache) {
   return pushed;
 }
 
-/// What woke the loop.
-enum class Activity : std::uint8_t { Timeout, Data, Tx, Error };
+}  // namespace
+
+namespace detail {
 
 /// Send every telegram waiting in the shared TX ring.
 /// Clears the eventfd first, so a push during draining re-arms it.
@@ -112,15 +117,14 @@ int drain_tx_queue(BusLink& link, SharedTxQueue& queue) {
 /// Never busy-loops: the eventfd is consumed by drain_tx_queue().
 Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_ms) {
   if (tx_queue == nullptr || tx_queue->eventfd() < 0) {
-    switch (link.wait_for_activity(timeout_ms)) {
-      case BusLink::WaitResult::GroupData:
-        return Activity::Data;
-      case BusLink::WaitResult::Timeout:
-        return Activity::Timeout;
-      case BusLink::WaitResult::Error:
-        return Activity::Error;
+    const auto result = link.wait_for_activity(timeout_ms);
+    if (result == BusLink::WaitResult::GroupData) {
+      return Activity::Data;
     }
-    return Activity::Timeout;
+    if (result == BusLink::WaitResult::Timeout) {
+      return Activity::Timeout;
+    }
+    return Activity::Error;
   }
 
   struct pollfd fds[2]{};
@@ -145,21 +149,31 @@ Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_m
   if ((fds[tx_index].revents & POLLIN) != 0) {
     return Activity::Tx;
   }
-  if (link_index >= 0) {
+  // Without a link fd only the eventfd was polled — and that wake-up returned
+  // above, so the false arm cannot be reached.
+  if (link_index >= 0) {  // GCOV_EXCL_BR_LINE
     if ((fds[link_index].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
       return Activity::Error;
     }
-    if ((fds[link_index].revents & POLLIN) != 0) {
+    // poll() reports POLLIN for any readable socket, so the false arm (a
+    // readable link fd without POLLIN or an error flag) cannot occur.
+    if ((fds[link_index].revents & POLLIN) != 0) {  // GCOV_EXCL_BR_LINE
       return Activity::Data;
     }
   }
-  return Activity::Timeout;
+  return Activity::Timeout;  // GCOV_EXCL_LINE - every revents combination returned above
 }
 
-}  // namespace
+}  // namespace detail
 
 void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_queue,
                       const CacheReaderOptions& options, const std::function<bool()>& should_stop) {
+  using detail::Activity;
+  using detail::drain_tx_queue;
+  using detail::sleep_interruptible;
+  using detail::stop_requested;
+  using detail::wait_for_activity;
+
   const int initial_backoff_ms = std::max(1, options.reconnect_backoff_ms);
   const int max_backoff_ms = std::max(initial_backoff_ms, options.max_reconnect_backoff_ms);
   const int wait_timeout_ms = std::max(1, options.wait_timeout_ms);
@@ -171,17 +185,17 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
   std::chrono::steady_clock::time_point last_log{};
 
   // Passing an empty std::function is allowed and means "never stop".
-  const auto stop_requested = [&should_stop]() -> bool {
-    return static_cast<bool>(should_stop) && should_stop();
-  };
+  const auto stop = [&should_stop]() { return stop_requested(should_stop); };
 
   // Rate-limited warning while knxd is unreachable.
-  const auto log_retry = [&logged_failure, &last_log](const std::string& reason) {
+  const int retry_log_interval_ms = std::max(0, options.retry_log_interval_ms);
+  const auto log_retry = [&logged_failure, &last_log,
+                          retry_log_interval_ms](const std::string& reason) {
     const auto now = std::chrono::steady_clock::now();
-    const bool due =
-        !logged_failure ||
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count() >=
-            kRetryLogIntervalMs;
+    const auto since_last_log =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
+    const bool interval_passed = since_last_log >= retry_log_interval_ms;
+    const bool due = !logged_failure || interval_passed;
     if (due) {
       // Emitted as a single line: the reader shares stderr with all workers.
       std::cerr << "[WARN] " + reason + " — retrying in the background\n";
@@ -194,7 +208,7 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
   // bus connection, and /r clients should see that right away.
   cache.publish_bus_status(false);
 
-  while (!stop_requested()) {
+  while (!stop()) {
     // ---------------- (Re)connect ----------------
     if (!connected) {
       if (link.connect()) {
@@ -230,35 +244,28 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
     }
 
     // ---------------- Wait for activity ----------------
-    switch (wait_for_activity(link, tx_queue, wait_timeout_ms)) {
-      case Activity::Tx:
-        continue;  // a worker queued a telegram — send it right away
-
-      case Activity::Data:
-        if (drain_telegrams(link, cache) > 0) {
-          backoff_ms = initial_backoff_ms;
-        }
-        break;
-
-      case Activity::Timeout:
-        // Nothing to do — just check the stop flag again.
-        break;
-
-      case Activity::Error:
-        // Connection lost (daemon restarted / "Link down, terminating" /
-        // router gone).  Never fall through to a busy loop: back off, then
-        // reconnect.
-        std::cerr << "[WARN] Lost connection to " + link.label() + " — reconnecting\n";
-        logged_failure = true;
-        last_log = std::chrono::steady_clock::now();
-
-        link.disconnect();
-        connected = false;
-        cache.publish_bus_status(false);
-        sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
-        backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
-        break;
+    const auto activity = wait_for_activity(link, tx_queue, wait_timeout_ms);
+    if (activity == Activity::Tx) {
+      continue;  // a worker queued a telegram — send it right away
     }
+    if (activity == Activity::Data && drain_telegrams(link, cache) > 0) {
+      backoff_ms = initial_backoff_ms;
+    }
+    if (activity == Activity::Error) {
+      // Connection lost (daemon restarted / "Link down, terminating" /
+      // router gone).  Never fall through to a busy loop: back off, then
+      // reconnect.
+      std::cerr << "[WARN] Lost connection to " + link.label() + " — reconnecting\n";
+      logged_failure = true;
+      last_log = std::chrono::steady_clock::now();
+
+      link.disconnect();
+      connected = false;
+      cache.publish_bus_status(false);
+      sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
+      backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
+    }
+    // Activity::Timeout needs no action — the loop re-checks the stop flag.
   }
 }
 

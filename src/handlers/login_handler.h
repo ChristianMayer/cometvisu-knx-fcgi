@@ -33,6 +33,27 @@
 namespace cvknx {
 
 class SessionStore;
+class JsonBuilder;
+
+/// Compile-time build information reported in the login response.
+/// Collected once per request and handed to add_login_config_block().
+struct LoginBuildInfo {
+  std::string_view fcgi_version{};  ///< version(); "unknown" when not injected
+  std::string_view fcgi_hash{};     ///< git_hash(); "unknown" when not injected
+  std::string_view knxd_version{};  ///< knxd_build_version(); empty when unknown
+  std::string_view knxd_hash{};     ///< knxd_build_git_hash(); empty when unknown
+  std::string_view extra_config{};  ///< LOGIN_EXTRA_CONFIG, empty when unset
+};
+
+/// Append the "c" configuration block to @p json.
+///
+/// The block is emitted only when at least one piece of information is known,
+/// so a plain backend stays byte-identical to the reference implementation.
+/// Split out of LoginHandler::handle() so that every combination of known and
+/// unknown build information is testable without touching compile-time macros
+/// or the process environment.
+void add_login_config_block(JsonBuilder& json, std::string_view base_url,
+                            const LoginBuildInfo& info);
 
 /**
  * @brief Handles CometVisu login requests: `GET /l?u=USER&p=PASSWORD&d=DEVICE`

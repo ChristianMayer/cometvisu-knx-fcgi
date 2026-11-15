@@ -106,5 +106,13 @@ TEST(KnxdConnectorTest, ConnectReturnsFalseWhenConnectionFails) {
   EXPECT_FALSE(result);
 }
 
+TEST(KnxdConnectorTest, DefaultDelaysSucceedOnTheFirstAttempt) {
+  // Exercises the built-in delay table (no custom array): a successful first
+  // attempt never sleeps.
+  MockBusLink mock;
+  mock.set_connection_success(true);
+  EXPECT_TRUE(connect_bus_with_retry(mock, false));
+}
+
 }  // namespace
 }  // namespace cvknx

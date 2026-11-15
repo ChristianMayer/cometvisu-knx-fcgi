@@ -31,6 +31,63 @@ constexpr uint8_t hi(uint16_t v) {
 constexpr uint8_t lo(uint16_t v) {
   return static_cast<uint8_t>(v & 0xFF);
 }
+
+TEST(KnxdProtocolTest, RejectsMalformedGroupAddresses) {
+  EXPECT_FALSE(KnxGroupAddress::from_string("").has_value());
+  EXPECT_FALSE(KnxGroupAddress::from_string("1").has_value());
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/2").has_value());
+  EXPECT_FALSE(KnxGroupAddress::from_string("32/0/0").has_value());   // main > 31
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/8/0").has_value());    // middle > 7
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/2/256").has_value());  // sub > 255
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/2/3/4").has_value());  // trailing
+}
+
+TEST(KnxdProtocolTest, ParseApduRejectsShortInput) {
+  ApduType type{};
+  std::vector<uint8_t> data;
+  EXPECT_FALSE(parse_apdu({0x00}, type, data));
+  EXPECT_FALSE(parse_apdu({}, type, data));
+}
+
+TEST(KnxdProtocolTest, ParseEibdMessageRejectsShortAndTruncatedInput) {
+  uint16_t type = 0;
+  std::vector<uint8_t> data;
+  EXPECT_FALSE(parse_eibd_message({}, type, data));
+  EXPECT_FALSE(parse_eibd_message({0x00, 0x10, 0x00}, type, data));
+  // Length prefix announces more bytes than present.
+  EXPECT_FALSE(parse_eibd_message({0x00, 0x10, 0x26}, type, data));
+}
+
+TEST(KnxdProtocolTest, RejectsMalformedAddressComponents) {
+  EXPECT_FALSE(KnxGroupAddress::from_string("-1/2/3").has_value());  // no digits
+  EXPECT_FALSE(KnxGroupAddress::from_string("a/2/3").has_value());   // not a digit
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/").has_value());      // missing part
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/2/").has_value());    // missing part
+  EXPECT_FALSE(KnxGroupAddress::from_string("1x/2/3").has_value());  // wrong separator
+  EXPECT_FALSE(KnxGroupAddress::from_string("1/2x/3").has_value());  // wrong separator
+}
+
+TEST(KnxdProtocolTest, ParseApduHandlesEveryApciValue) {
+  ApduType type{};
+  std::vector<uint8_t> data;
+  // A_GroupValue_Read carries no data.
+  ASSERT_TRUE(parse_apdu({0x00, 0x00}, type, data));
+  EXPECT_EQ(type, ApduType::Read);
+  EXPECT_TRUE(data.empty());
+  // A_GroupValue_Response.
+  ASSERT_TRUE(parse_apdu({0x00, 0x40}, type, data));
+  EXPECT_EQ(type, ApduType::Response);
+  // 0xC0 is not a defined APCI: parsed as unknown, data stays empty.
+  ASSERT_TRUE(parse_apdu({0x00, 0xC0}, type, data));
+  EXPECT_TRUE(data.empty());
+}
+
+TEST(KnxdProtocolTest, ParseEibdMessageRejectsLengthOverrun) {
+  uint16_t type = 0;
+  std::vector<uint8_t> data;
+  // Announces a 16 byte payload but carries none of it.
+  EXPECT_FALSE(parse_eibd_message({0x00, 0x10, 0x26, 0x00}, type, data));
+}
 }  // namespace
 
 // ---- KnxGroupAddress ----

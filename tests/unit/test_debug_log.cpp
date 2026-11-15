@@ -302,4 +302,46 @@ TEST_F(DebugLogTest, InitFromEnvDisabledWhenFalse) {
 }
 
 }  // namespace
+
+TEST_F(DebugLogTest, InitFromEnvHandlesUnsetEmptyAndTruthyValues) {
+  ::unsetenv("DEBUG_BACKEND");
+  DebugLog::init_from_env();
+  EXPECT_FALSE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "", 1);
+  DebugLog::init_from_env();
+  EXPECT_FALSE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "1", 1);
+  DebugLog::init_from_env();
+  EXPECT_TRUE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "true", 1);
+  DebugLog::init_from_env();
+  EXPECT_TRUE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "yes", 1);
+  DebugLog::init_from_env();
+  EXPECT_TRUE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "on", 1);
+  DebugLog::init_from_env();
+  EXPECT_TRUE(DebugLog::is_enabled());
+
+  ::setenv("DEBUG_BACKEND", "0", 1);
+  DebugLog::init_from_env();
+  EXPECT_FALSE(DebugLog::is_enabled());
+
+  ::unsetenv("DEBUG_BACKEND");
+}
+
+TEST_F(DebugLogTest, KnxdSendAndRecvOmitEmptyDetails) {
+  DebugLog::set_enabled(true);
+  StderrCapture capture;
+  DebugLog::knxd_send("group_packet", "1/2/3", "");
+  DebugLog::knxd_recv("apdu", "1/2/3", "");
+  const std::string out = capture.str();
+  EXPECT_NE(out.find("KNXD SEND: group_packet addr=1/2/3\n"), std::string::npos) << out;
+  EXPECT_NE(out.find("KNXD RECV: apdu addr=1/2/3\n"), std::string::npos) << out;
+}
 }  // namespace cvknx

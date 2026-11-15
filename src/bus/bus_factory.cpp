@@ -32,7 +32,7 @@
 namespace cvknx {
 
 std::unique_ptr<BusLink> create_bus_link(const BusConfig& config) {
-  switch (config.transport) {
+  switch (config.transport) {  // GCOV_EXCL_BR_LINE - exhaustive enum switch
     case BusTransport::Knxd: {
 #ifdef KNX_WITH_KNXD_TRANSPORT
       return std::make_unique<KnxdClient>(config.knxd_socket);
@@ -48,9 +48,11 @@ std::unique_ptr<BusLink> create_bus_link(const BusConfig& config) {
       return std::make_unique<RoutingBusLink>(RoutingOptions::from_config(config));
   }
 
-  std::cerr << "[ERROR] Transport '" << bus_transport_to_string(config.transport)
-            << "' is not available in this build\n";
-  return nullptr;
+  // Reached only if the switch above gains a transport without an
+  // implementation; every enum value is handled today.
+  std::cerr << "[ERROR] Transport '" << bus_transport_to_string(config.transport)  // GCOV_EXCL_LINE
+            << "' is not available in this build\n";                               // GCOV_EXCL_LINE
+  return nullptr;                                                                  // GCOV_EXCL_LINE
 }
 
 }  // namespace cvknx

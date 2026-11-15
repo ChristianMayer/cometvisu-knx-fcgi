@@ -133,3 +133,15 @@ TEST(JsonBuilderTest, AddBoolInsideNestedObject) {
   jb.end_object();
   EXPECT_EQ(jb.str(), R"({"i":3,"knxd":{"ok":false}})");
 }
+
+TEST(JsonBuilderTest, EscapesControlCharacters) {
+  JsonBuilder jb;
+  jb.start_object();
+  jb.add_string("k", "back\\slash\nnewline\rcr\ttab");
+  jb.end_object();
+  const std::string text = jb.str();
+  EXPECT_NE(text.find("\\\\"), std::string::npos) << text;
+  EXPECT_NE(text.find("\\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("\\r"), std::string::npos) << text;
+  EXPECT_NE(text.find("\\t"), std::string::npos) << text;
+}

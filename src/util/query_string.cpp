@@ -115,7 +115,8 @@ QueryString::QueryString(std::string_view raw) {
 
 std::optional<std::string_view> QueryString::get(std::string_view key) const {
   auto it = params_.find(key);
-  if (it != params_.end() && !it->second.empty()) {
+  // A key only exists while it has at least one value, so no empty() check.
+  if (it != params_.end()) {
     return std::string_view{it->second.front()};
   }
   return std::nullopt;

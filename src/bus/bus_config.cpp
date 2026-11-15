@@ -80,7 +80,7 @@ std::optional<BusTransport> bus_transport_from_string(std::string_view name) {
 }
 
 const char* bus_transport_to_string(BusTransport transport) {
-  switch (transport) {
+  switch (transport) {  // GCOV_EXCL_BR_LINE - exhaustive enum switch
     case BusTransport::Knxd:
       return "knxd";
     case BusTransport::IpTunnel:
@@ -98,7 +98,7 @@ std::string_view BusConfig::outage_key() const {
 std::string BusConfig::describe() const {
   std::string text = "transport=";
   text += bus_transport_to_string(transport);
-  switch (transport) {
+  switch (transport) {  // GCOV_EXCL_BR_LINE - exhaustive enum switch
     case BusTransport::Knxd:
       text += " socket=" + knxd_socket;
       break;
@@ -119,7 +119,7 @@ std::string BusConfig::describe() const {
       break;
   }
   return text;
-}
+}  // GCOV_EXCL_LINE - closing brace, no statement
 
 std::optional<BusConfig> BusConfig::parse(const EnvGetter& get, std::string& error) {
   error.clear();
@@ -198,7 +198,10 @@ std::optional<BusConfig> BusConfig::parse(const EnvGetter& get, std::string& err
 std::optional<BusConfig> BusConfig::from_env(std::string& error) {
   const EnvGetter get = [](const char* name) -> std::string {
     const char* value = std::getenv(name);
-    return value != nullptr ? std::string{value} : std::string{};
+    if (value == nullptr) {
+      return {};
+    }
+    return value;
   };
   return parse(get, error);
 }

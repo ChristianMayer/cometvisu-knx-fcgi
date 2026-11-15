@@ -406,3 +406,16 @@ TEST_F(GroupCacheTest, NewHandlerReadsFromExistingCache) {
   EXPECT_TRUE(fresh_view.get(0x0A03).has_value());
   EXPECT_EQ(fresh_view.position(), 1);
 }
+
+TEST_F(GroupCacheTest, RejectsEntriesOlderThanTheAgeLimit) {
+  cache_.push(0x0A03, {0x00, 0x80, 0x42});
+  // Anything older than 0 seconds counts as stale.
+  EXPECT_FALSE(cache_.get(0x0A03, /*max_age_sec=*/0).has_value());
+  EXPECT_TRUE(cache_.get(0x0A03, /*max_age_sec=*/-1).has_value());
+}
+
+TEST_F(GroupCacheTest, AcceptsEntriesYoungerThanTheAgeLimit) {
+  cache_.push(0x0A03, {0x00, 0x80, 0x42});
+  // A generous age limit keeps a just-written entry readable.
+  EXPECT_TRUE(cache_.get(0x0A03, /*max_age_sec=*/60).has_value());
+}

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -51,6 +52,9 @@ struct CacheReaderOptions {
   int max_reconnect_backoff_ms = 30000;
   /// Granularity of interruptible sleeps between reconnect attempts.
   int sleep_slice_ms = 100;
+  /// Minimum interval between two "cannot connect / lost connection" warnings.
+  /// knxd may be gone for days; the log must not be flooded meanwhile.
+  int retry_log_interval_ms = 30000;
 };
 
 /// Pump group telegrams from the bus into the shared cache until should_stop()
@@ -69,5 +73,34 @@ struct CacheReaderOptions {
 /// @param should_stop Cooperative stop predicate, evaluated frequently.
 void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_queue,
                       const CacheReaderOptions& options, const std::function<bool()>& should_stop);
+
+/// Building blocks of the loop, exposed so that each wake-up path can be tested
+/// on its own (the loop itself only exercises them indirectly).
+namespace detail {
+
+/// What woke the cache reader loop.
+enum class Activity : std::uint8_t { Timeout, Data, Tx, Error };
+
+/// Sleep for @p duration_ms, but wake up early when should_stop() becomes true.
+/// Sleeps in slices so a shutdown never waits for a full backoff period.
+/// An empty should_stop means "never stop early".
+void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool()>& should_stop);
+
+/// Evaluate a cooperative stop predicate.  An empty predicate means "never
+/// stop", which keeps the loop running until the process is killed.
+[[nodiscard]] bool stop_requested(const std::function<bool()>& should_stop);
+
+/// Send every telegram waiting in the shared TX ring.
+/// Clears the eventfd first, so a push during draining re-arms it.
+/// @return number of telegrams handed to the bus without error.
+int drain_tx_queue(BusLink& link, SharedTxQueue& queue);
+
+/// Wait for bus traffic, an outgoing telegram, or the timeout — one poll().
+/// Never busy-loops: the eventfd is consumed by drain_tx_queue().
+/// @param tx_queue Optional shared TX ring; when null (or without an eventfd)
+///        only the bus link is polled.
+Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_ms);
+
+}  // namespace detail
 
 }  // namespace cvknx

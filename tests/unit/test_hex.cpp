@@ -87,3 +87,13 @@ TEST(HexTest, RoundTrip) {
   auto result = hex_encode(bytes.data(), bytes.size());
   EXPECT_EQ(result, original);
 }
+
+TEST(HexTest, DecodeRejectsNonHexDigits) {
+  EXPECT_TRUE(hex_decode("0g").empty());
+  EXPECT_TRUE(hex_decode("zz").empty());
+  EXPECT_TRUE(hex_decode("0x42").empty());
+  // Upper and lower case decode identically.
+  const auto upper = hex_decode("0C6F");
+  ASSERT_EQ(upper.size(), 2U);
+  EXPECT_EQ(upper, hex_decode("0c6f"));
+}

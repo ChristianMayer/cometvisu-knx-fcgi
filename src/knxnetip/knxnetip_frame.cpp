@@ -102,10 +102,13 @@ std::vector<std::uint8_t> build_frame(ServiceType service, const std::vector<std
   append_u16(frame, total);
   frame.insert(frame.end(), body.begin(), body.end());
   return frame;
-}
+}  // GCOV_EXCL_LINE - closing brace, no statement
 
 std::optional<Frame> parse_frame(const std::uint8_t* data, std::size_t size) {
-  if (data == nullptr || size < kHeaderLength) {
+  if (data == nullptr) {
+    return std::nullopt;
+  }
+  if (size < kHeaderLength) {
     return std::nullopt;
   }
   if (data[0] != kHeaderLength || data[1] != kProtocolVersion) {
@@ -142,10 +145,19 @@ std::vector<std::uint8_t> encode_hpai(const Hpai& hpai) {
   out.insert(out.end(), bytes, bytes + 4);
   append_u16(out, hpai.port);
   return out;
-}
+}  // GCOV_EXCL_LINE - closing brace, no statement
 
 std::optional<Hpai> parse_hpai(const std::uint8_t* data, std::size_t size) {
-  if (data == nullptr || size < 8 || data[0] != 0x08 || data[1] != kHostProtocolIpv4Udp) {
+  if (data == nullptr) {
+    return std::nullopt;
+  }
+  if (size < 8) {
+    return std::nullopt;
+  }
+  if (data[0] != 0x08) {
+    return std::nullopt;
+  }
+  if (data[1] != kHostProtocolIpv4Udp) {
     return std::nullopt;
   }
   Hpai hpai;
@@ -172,8 +184,8 @@ std::string ipv4_to_string(std::uint32_t address) {
   struct in_addr addr {};
   addr.s_addr = htonl(address);
   char buffer[INET_ADDRSTRLEN] = {};
-  if (::inet_ntop(AF_INET, &addr, buffer, sizeof(buffer)) == nullptr) {
-    return {};
+  if (::inet_ntop(AF_INET, &addr, buffer, sizeof(buffer)) == nullptr) {  // GCOV_EXCL_BR_LINE
+    return {};  // GCOV_EXCL_LINE - only fails for a bad family
   }
   return buffer;
 }
@@ -190,7 +202,10 @@ std::vector<std::uint8_t> build_connect_request(const Hpai& control, const Hpai&
 
 std::optional<ConnectResponse> parse_connect_response(const std::vector<std::uint8_t>& frame) {
   const auto parsed = parse_frame(frame);
-  if (!parsed || parsed->service != ServiceType::ConnectResponse) {
+  if (!parsed) {
+    return std::nullopt;
+  }
+  if (parsed->service != ServiceType::ConnectResponse) {
     return std::nullopt;
   }
   const auto& body = parsed->body;
@@ -251,7 +266,10 @@ std::vector<std::uint8_t> build_tunnelling_request(std::uint8_t channel, std::ui
 
 std::optional<TunnellingRequest> parse_tunnelling_request(const std::vector<std::uint8_t>& frame) {
   const auto parsed = parse_frame(frame);
-  if (!parsed || parsed->service != ServiceType::TunnellingRequest) {
+  if (!parsed) {
+    return std::nullopt;
+  }
+  if (parsed->service != ServiceType::TunnellingRequest) {
     return std::nullopt;
   }
   const auto& body = parsed->body;
@@ -278,7 +296,10 @@ std::vector<std::uint8_t> build_tunnelling_ack(std::uint8_t channel, std::uint8_
 
 std::optional<TunnellingAck> parse_tunnelling_ack(const std::vector<std::uint8_t>& frame) {
   const auto parsed = parse_frame(frame);
-  if (!parsed || parsed->service != ServiceType::TunnellingAck) {
+  if (!parsed) {
+    return std::nullopt;
+  }
+  if (parsed->service != ServiceType::TunnellingAck) {
     return std::nullopt;
   }
   const auto& body = parsed->body;
@@ -295,7 +316,13 @@ std::vector<std::uint8_t> build_routing_indication(const std::vector<std::uint8_
 std::optional<std::vector<std::uint8_t>> parse_routing_indication(
     const std::vector<std::uint8_t>& frame) {
   const auto parsed = parse_frame(frame);
-  if (!parsed || parsed->service != ServiceType::RoutingIndication || parsed->body.empty()) {
+  if (!parsed) {
+    return std::nullopt;
+  }
+  if (parsed->service != ServiceType::RoutingIndication) {
+    return std::nullopt;
+  }
+  if (parsed->body.empty()) {
     return std::nullopt;
   }
   return parsed->body;
@@ -307,7 +334,10 @@ std::vector<std::uint8_t> build_search_request(const Hpai& control) {
 
 std::optional<SearchResponse> parse_search_response(const std::vector<std::uint8_t>& frame) {
   const auto parsed = parse_frame(frame);
-  if (!parsed || parsed->service != ServiceType::SearchResponse) {
+  if (!parsed) {
+    return std::nullopt;
+  }
+  if (parsed->service != ServiceType::SearchResponse) {
     return std::nullopt;
   }
   const auto& body = parsed->body;
@@ -315,8 +345,11 @@ std::optional<SearchResponse> parse_search_response(const std::vector<std::uint8
     return std::nullopt;
   }
   const auto control = parse_hpai(body.data(), body.size());
+  if (!control) {
+    return std::nullopt;
+  }
   const auto endpoint = parse_hpai(body.data() + 8, body.size() - 8);
-  if (!control || !endpoint) {
+  if (!endpoint) {
     return std::nullopt;
   }
 
@@ -329,10 +362,17 @@ std::optional<SearchResponse> parse_search_response(const std::vector<std::uint8
   while (offset + 2 <= body.size()) {
     const std::size_t dib_length = body[offset];
     const std::uint8_t dib_type = body[offset + 1];
-    if (dib_length < 2 || offset + dib_length > body.size()) {
+    if (dib_length < 2) {
       break;
     }
-    if (dib_type == 0x01 && dib_length >= 54) {
+    if (offset + dib_length > body.size()) {
+      break;
+    }
+    if (dib_type != 0x01) {
+      offset += dib_length;
+      continue;
+    }
+    if (dib_length >= 54) {
       const std::uint8_t* dib = body.data() + offset + 2;
       response.individual_address = read_u16(dib + 2);
       response.multicast_address = (static_cast<std::uint32_t>(dib[12]) << 24) |

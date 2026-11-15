@@ -67,6 +67,7 @@
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "state/shared_tx_queue.h"
+#include "util/coverage.h"
 #include "util/debug_log.h"
 #include "util/fork_safety.h"
 #include "version.h"
@@ -493,6 +494,7 @@ int main(int argc, char* argv[]) {
         // stoppable and testable.
         auto reader_link = create_bus_link(bus_config);
         if (!reader_link) {
+          KNX_COVERAGE_DUMP();
           std::_Exit(1);
         }
         std::cout << "[INFO] Cache reader started, pid=" << ::getpid() << " ("
@@ -507,6 +509,7 @@ int main(int argc, char* argv[]) {
         std::cout << "[INFO] Cache reader shutting down\n";
         std::cout << std::flush;
         reader_link->disconnect();
+        KNX_COVERAGE_DUMP();
         std::_Exit(0);
       }
       return pid;
@@ -542,6 +545,7 @@ int main(int argc, char* argv[]) {
 
         const int child_result = server.run();
         worker_link.disconnect();
+        KNX_COVERAGE_DUMP();
         std::_Exit(child_result);
       }
       return pid;

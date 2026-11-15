@@ -300,3 +300,21 @@ TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
   EXPECT_EQ(result.http_status, 200);
   EXPECT_EQ(result.body.find("\"knxd\""), std::string::npos) << result.body;
 }
+
+// ================================================================
+// Value validation edge cases
+// ================================================================
+
+TEST_F(WriteHandlerTest, EmptyValueIsANoOp) {
+  WriteHandler handler(knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&v=");
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, ValueWithoutApciIsANoOp) {
+  WriteHandler handler(knxd_, sessions_);
+  auto r = handler.handle("a=1/2/3&v=42");
+  EXPECT_EQ(r.http_status, 200);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}

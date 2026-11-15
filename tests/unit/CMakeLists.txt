@@ -84,6 +84,12 @@ add_executable(test_fcgi_server
 target_link_libraries(test_fcgi_server PRIVATE cvknx_fcgi cvknx_util GTest::gtest GTest::gtest_main)
 add_test(NAME test_fcgi_server COMMAND test_fcgi_server)
 
+add_executable(test_fcgi_request
+    test_fcgi_request.cpp
+)
+target_link_libraries(test_fcgi_request PRIVATE cvknx_fcgi GTest::gtest GTest::gtest_main)
+add_test(NAME test_fcgi_request COMMAND test_fcgi_request)
+
 add_executable(test_knxd_connector
     test_knxd_connector.cpp
 )
@@ -96,6 +102,12 @@ add_executable(test_knxd_client_socket
 )
 target_link_libraries(test_knxd_client_socket PRIVATE cvknx_knxd GTest::gtest GTest::gtest_main)
 add_test(NAME test_knxd_client_socket COMMAND test_knxd_client_socket)
+
+add_executable(test_knxd_client_protocol
+    test_knxd_client_protocol.cpp
+)
+target_link_libraries(test_knxd_client_protocol PRIVATE cvknx_knxd GTest::gtest GTest::gtest_main)
+add_test(NAME test_knxd_client_protocol COMMAND test_knxd_client_protocol)
 endif()
 
 add_executable(test_cache_reader
