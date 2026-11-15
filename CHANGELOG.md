@@ -9,167 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-- **`KNX_TRANSPORT` is mandatory.** The backend no longer defaults to knxd.
-  All three transports — `knxd`, `ip-tunnel`, `ip-routing` — are equally
-  supported and the operator selects one explicitly. An unset or unknown value
-  logs `[ERROR]` and exits with status 1; it is never replaced by a silent
-  default (a wrong `ip-*` configuration must not look like a knxd outage).
-
-  Migration: add `KNX_TRANSPORT=knxd` to the environment of every existing
-  deployment to get 1.x behaviour unchanged.
-
-- **The outage block in `/r` and `/w` is transport-dependent.** It is still
-  `"knxd": {"ok": false, ...}` when `KNX_TRANSPORT=knxd`, but `"bus": {...}`
-  for the KNXnet/IP transports. The inner shape (`ok`/`since`/`lastOk`) is
-  identical; clients must ignore keys they do not know.
-
-- The build-time condition for knxd is now a CMake option,
-  `KNX_BUILD_KNXD_TRANSPORT` (default `ON`). With `-DKNX_BUILD_KNXD_TRANSPORT=OFF`
-  the project builds and runs without any knxd header or daemon.
+- **`KNX_TRANSPORT` is now mandatory.**  There is no default transport: choose
+  `knxd`, `ip-tunnel` or `ip-routing`.  An unset or unknown value stops the
+  backend at startup with `[ERROR] KNX_TRANSPORT is required …` instead of
+  silently falling back to knxd — a wrong `ip-*` setup must not look like an
+  outage.
+  **Migration:** add `KNX_TRANSPORT=knxd` to keep 1.x behaviour unchanged.
+- **The project is renamed** from `cometvisu-knxd-fcgi` to
+  `cometvisu-knx-fcgi` (<https://github.com/CometVisu/cometvisu-knx-fcgi>).
+  Update `spawn-fcgi`, container and systemd invocations that start the binary
+  by path; a `cometvisu-knxd-fcgi` symlink keeps existing setups working.
+- **The outage block in `/r` and `/w` uses a transport-specific key**: `"knxd"`
+  for the knxd transport (unchanged) and `"bus"` for the KNXnet/IP transports.
+  The inner object (`ok`, `since`, `lastOk`) is identical.
 
 ### Added
 
-- **KNXnet/IP IP tunneling** (`KNX_TRANSPORT=ip-tunnel`, `src/knxnetip/`): a
-  full tunnelling client — CONNECT/CONNECTIONSTATE/DISCONNECT handshake,
-  sequence numbers with duplicate and out-of-order rejection, TUNNELLING_ACK
-  with retransmission of the same sequence, heartbeat every
-  `KNX_IP_HEARTBEAT_SEC`, reconnect with the existing exponential backoff.
-  One tunnel serves all workers.
-- **KNXnet/IP IP routing** (`KNX_TRANSPORT=ip-routing`): multicast member of
-  `224.0.23.12`, stateless fire-and-forget sending, TTL 16, loop enabled. Works
-  with **no knxd installed**. Own echoes (`L_Data.req`) are dropped by the
-  codec, so a write is never delivered twice.
-- **Shared TX queue** (`src/state/shared_tx_queue.*`): a 256-slot ring in
-  shared memory plus an inherited `eventfd`. Workers only enqueue group
-  telegrams; the cache reader is the single owner of the bus connection for
-  RX *and* TX. `FCGI_WORKERS` therefore no longer multiplies knxd client slots
-  (one instead of `FCGI_WORKERS + 1`) or KNXnet/IP tunnels (one instead of one
-  per worker). A telegram that cannot be sent stays queued — a write is never
-  lost silently — and a write during an outage is rejected (`503`) instead of
-  being queued.
-- **Transport seam** (`src/bus/`): one `BusLink` interface, one implementation
-  per transport, and a `BusFactory` as the only place that knows them.
-  Handlers, router and cache never branch on the transport.
-- **cEMI codec** (`src/knxnetip/cemi.*`) and **KNXnet/IP framing**
-  (`src/knxnetip/knxnetip_frame.*`) with complete hex vectors in the unit
-  tests (`test_cemi`, `test_knxnetip_frame`).
-- **Discovery**: `cometvisu-knx-fcgi --discover` sends a SEARCH_REQUEST and
-  prints every answering device with its individual and multicast address
-  (`src/knxnetip/discovery.*`).
-- **Coverage gate** (`ENABLE_COVERAGE=ON`, `tools/coverage.sh`,
-  `tools/check_coverage.py`): every line and every branch arm in `src/` must be
-  reached by a test.  New files must be at 100 %; files in
-  `tools/coverage-baseline.json` must not regress, and `--strict` enforces
-  100 % everywhere.  New tests: `test_knxnetip_frame_negative`,
-  `test_transport_edge_cases` (plus many added cases).
-- `test_bus_config`, `test_shared_tx_queue`, `test_shared_tx_bus_link`,
-  `test_knxnetip_frame`, `test_cemi`, `test_knxnetip_routing`,
-  `test_knxnetip_tunnel`, `test_discovery`.
-
-### Fixed
-
-- **The cache reader ignored a dead bus link when the shared TX queue was in
-  use.**  The loop polls the link fd itself, so a device that dropped the
-  tunnel (`CONNECTIONSTATE_RESPONSE` with status `0x04`) or a link that
-  reported itself disconnected was never reconnected — writes stayed queued
-  forever.  Every iteration now re-checks `BusLink::is_connected()`.
-  (Found by `test_transport_recovery`.)
-- **A permanently failing send could spin the cache reader at 100 % CPU.**
-  While a backlog exists the loop polls with a zero timeout; with a link that
-  keeps rejecting sends that became a busy loop.  A failed send now falls
-  through to a normal (sleeping) wait and the telegram stays queued.
-- **A failed send no longer consumes the telegram.**  The queue is peeked, and
-  the slot is only dropped after the bus link accepted the telegram — a write
-  is never lost silently.
-- **TX bursts no longer starve inbound traffic.**  At most 8 telegrams are sent
-  per batch, with a zero-timeout poll in between, so received telegrams are
-  processed during a write burst and `SIGTERM` is honoured between telegrams.
-
-### Tests
-
-- New multi-process and failure-mode suites: `test_tx_queue_multiprocess`
-  (forked producers, killed producers, robust-mutex recovery under load, full
-  queue, consumer restart), `test_cache_reader_backpressure` (slow bus, silent
-  bus, backlog across an outage, prompt shutdown, concurrent handlers),
-  `test_transport_recovery` (real tunnelling link + queue against a
-  rate-limited, silent and restarting router) and new FCGI-level cases in
-  `test_concurrent_clients` (concurrent writes across forked workers delivered
-  exactly once, writes during an outage rejected and not queued, long-polls not
-  delaying writes).  The tunnelling suite gained delayed-ACK retransmission,
-  stale-ACK, inbound-burst and RX/TX interleaving cases.
+- **Direct KNXnet/IP tunnelling** (`KNX_TRANSPORT=ip-tunnel`): the backend is a
+  client of a KNX IP interface or router — no knxd required.  Includes the
+  tunnel handshake, acknowledgement and retransmission, rejection of duplicate
+  and out-of-order frames, keep-alive, and automatic reconnect after a device
+  restart or tunnel loss.
+- **Direct KNXnet/IP routing** (`KNX_TRANSPORT=ip-routing`): the backend joins
+  the routing multicast group (default `224.0.23.12`) and works with **no knxd
+  installed**.
+- **`--discover`**: sends a KNXnet/IP SEARCH_REQUEST and lists every answering
+  device with its individual and multicast address.
 
 ### Changed
 
-- **The project is renamed from `cometvisu-knxd-fcgi` to `cometvisu-knx-fcgi`.**
-  The GitHub repository moved to
-  <https://github.com/CometVisu/cometvisu-knx-fcgi> (fork:
-  <https://github.com/ChristianMayer/cometvisu-knx-fcgi>).  The CMake project
-  name, the executable, the install target, the `--help`/`--version` output,
-  the startup log line and the VS Code launch/task configurations all use the
-  new name.  Deployments that start the binary by path (`spawn-fcgi`, container
-  entrypoints, systemd units) must be updated.  A symlink
-  `cometvisu-knxd-fcgi -> cometvisu-knx-fcgi` keeps existing setups working
-  during the transition.
-- Namespace `cvknxd` → `cvknx`, CMake targets `cvknxd_*` → `cvknx_*`,
-  compile definition `CVKNXD_BINARY` → `CVKNX_BINARY`. All headers use
-  `#pragma once`.
-- The knxd client (now `KnxdClient`, a `BusLink`) opens one read-write group
-  socket in the cache reader instead of a write-only socket per worker.
-- `connect_knxd_with_retry()` became the transport-neutral
-  `connect_bus_with_retry()` (`src/bus/bus_connector.*`) and is used for the
-  short startup probe.
-- **Documentation consolidated**: `PLAN.md` and `PLAN-KNXNETIP.md` were removed.
-  The architecture and design decisions live in `AGENTS.md`, the client
-  contract and configuration in `README.md`, deferred work in `ROADMAP.md`.
-- Transport-neutral code moved out of `src/knxd/`: the cache reader is now
-  `src/bus/cache_reader.*`, the outage helper `src/handlers/bus_status_json.*`.
-  `src/knxd/` keeps the knxd transport plus the shared KNX address/APDU helpers
-  in `knxd_protocol.*` (their eibd-specific parts are `#ifdef`-guarded).
-- **Development container** (`.devcontainer/`) with the complete toolchain
-  (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb), `libfcgi-dev`,
-  `knxd`/`knxd-dev` for the knxd transport, and the networking tools needed for
-  KNXnet/IP work.
+- **One bus connection regardless of `FCGI_WORKERS`.**  All workers share the
+  single bus link owned by the cache reader, so the worker count no longer
+  multiplies knxd client slots (one instead of `FCGI_WORKERS + 1`) or KNXnet/IP
+  tunnels (one instead of one per worker — a KNX IP interface usually offers
+  only four).
+- **A write during a bus outage is reported as failed** (`503`) instead of
+  being queued: the client learns immediately that the telegram did not leave,
+  rather than receiving `200`.  A telegram that was accepted but cannot be sent
+  stays queued and is delivered after the reconnect.
+- **knxd is optional at build time.**  `-DKNX_BUILD_KNXD_TRANSPORT=OFF` builds
+  a binary without any knxd header or daemon.
 
 ### Fixed
 
-- **`KnxdClient::connect()` leaked a file descriptor** when the socket path was
-  longer than `sockaddr_un::sun_path`: the early return left the freshly created
-  socket open. Every rejected attempt (a misconfigured `KNXD_SOCKET`) burned one
-  descriptor per reconnect, so the cache reader would eventually exhaust them.
-
-- **A POST/PUT request could kill a worker process.** `read_request()` read the
-  body with `FCGI_fread(..., stdin)` in *both* modes. In direct-socket mode that
-  stream belongs to the spawn-fcgi layer and returns a meaningless byte count;
-  adding it to the running total overflowed and the following
-  `std::string::resize()` threw `std::length_error` out of `run()`, terminating
-  the worker (the supervisor restarted it, but the request was lost). The
-  direct-socket path now reads the body from the request's FCGX stream
-  (`FCGX_GetStr(request_.in)`), and both paths clamp the reported count.
-
-### Tests
-
-- **Coverage gate is enforced in CI** (`tools/check_coverage.py`, job
-  `coverage`): every line and every branch arm under `src/` must be reached by a
-  test.  **`tools/coverage.sh --strict` is clean — 100 % lines and 100 %
-  branches for every file**; the committed baseline records that floor so a new
-  gap in any file fails the build.
-- `tests/unit/test_fcgi_server_run.cpp`: full FastCGI record protocol against a
-  child running `FcgiServer::run()` — parameter parsing, POST bodies, the
-  long-poll capacity limiting, handler exceptions and the shutdown wake-up.
-- `tests/e2e/test_spawn_mode_e2e.cpp`: the built binary in spawn-fcgi mode,
-  driven over stdin/stdout (including the POST body paths).
-- `tests/e2e/test_main_e2e.cpp`: command line, configuration validation and the
-  fork-based supervisor — worker and cache-reader restarts after a kill, token
-  restoration after a worker dies during a long poll, and the SIGTERM shutdown.
-  A fake KNXnet/IP device covers `--discover` with a real answer.
-- `tests/unit/test_knxd_client_protocol.cpp`: scripted fake knxd for the eibd
-  handshake, group writes, APDU/injected group packets, partial and unparsable
-  frames, handshake deadlines and recovery after a broken socket.
-- New suites: `test_fcgi_request`, the login config-block builder, the cache
-  reader's direct `poll()` wake-up paths, robust-mutex recovery (a forked child
-  dies holding the shared cache lock) and full-table/age-filter cases for
-  `SharedGroupCache`.
-
+- **A `POST`/`PUT` request could terminate a worker** in direct-socket mode: the
+  body length was taken from the wrong stream and an overflowing value threw
+  out of the request loop.  The worker died (and was restarted), the request was
+  lost.
+- **The cache reader could stop reconnecting** when writes were in flight, so
+  queued telegrams stayed stuck until a restart.
+- **A permanently failing send could spin the cache reader at 100 % CPU.**
+- **A telegram that failed to send was dropped.**  It now stays queued and is
+  sent after the reconnect — a write is never lost silently.
+- **A rejected knxd connection leaked a file descriptor** per attempt when
+  `KNXD_SOCKET` was misconfigured, eventually exhausting the process.
 
 ## [1.2.1] — 2026-11-15
 
