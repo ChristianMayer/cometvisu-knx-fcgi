@@ -385,7 +385,13 @@ TEST_F(TransportRecoveryTest, RateLimitedRouterReceivesEveryTelegramExactlyOnce)
     EXPECT_GT(sequence, last[producer]) << "order broken for producer " << producer;
     last[producer] = sequence;
   }
-  EXPECT_EQ(queue_.size(), 0U);
+  // "Exactly once" is an eventual property, not an instantaneous one: the
+  // router records the telegram *before* it ACKs, and the reader drops the slot
+  // only after the ACK arrived.  Asserting the queue length immediately after
+  // the last delivery therefore races against that handshake — it did fail
+  // intermittently on fast Release builds in CI.
+  EXPECT_TRUE(WaitUntil([this] { return queue_.size() == 0; }, 5000))
+      << "telegrams still queued: " << queue_.size();
 }
 
 TEST_F(TransportRecoveryTest, SilentDeviceLosesNothingAndRecoversInOrder) {
