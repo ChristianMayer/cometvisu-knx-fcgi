@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The project is renamed from `cometvisu-knxd-fcgi` to `cometvisu-knx-fcgi`.**
+  The GitHub repository moved to
+  <https://github.com/CometVisu/cometvisu-knx-fcgi> (fork:
+  <https://github.com/ChristianMayer/cometvisu-knx-fcgi>).  The CMake project
+  name, the executable, the install target, the `--help`/`--version` output,
+  the startup log line and the VS Code launch/task configurations all use the
+  new name.  The rename anticipates a direct KNXnet/IP transport (IP tunneling
+  and IP routing) next to the existing knxd transport; the knxd behaviour
+  itself is unchanged.
+  Deployments that start the binary by path (`spawn-fcgi`, container
+  entrypoints, systemd units) must be updated.  A symlink
+  `cometvisu-knxd-fcgi -> cometvisu-knx-fcgi` keeps existing setups working
+  during the transition.
+
+### Added
+
+- **Development container** (`.devcontainer/`) with the complete toolchain
+  (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb), `libfcgi-dev`,
+  `knxd`/`knxd-dev` for the knxd transport, and the networking tools needed for
+  KNXnet/IP work.
+
 ## [1.2.1] — 2026-11-15
 
 ### Fixed

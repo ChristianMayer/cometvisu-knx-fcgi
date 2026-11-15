@@ -31,7 +31,7 @@ std::string_view version() {
 }
 
 std::string_view application_name() {
-  return "cometvisu-knxd-fcgi";
+  return "cometvisu-knx-fcgi";
 }
 
 std::string_view git_hash() {

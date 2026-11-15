@@ -158,7 +158,7 @@ int main(int argc, char* argv[]) {
           << application_name() << " " << version() << "\n"
           << "FastCGI backend bridging CometVisu Protocol to knxd\n"
           << "\n"
-          << "Usage: cometvisu-knxd-fcgi [OPTION]\n"
+          << "Usage: cometvisu-knx-fcgi [OPTION]\n"
           << "\n"
           << "Options:\n"
           << "  --version, -v   Print version information and exit\n"
@@ -247,7 +247,7 @@ int main(int argc, char* argv[]) {
   const char* fcgi_socket = get_env_default("FCGI_SOCKET", "");
 
   // ---- Startup info ----
-  std::cout << "[INFO] cometvisu-knxd-fcgi " << version() << " starting\n";
+  std::cout << "[INFO] cometvisu-knx-fcgi " << version() << " starting\n";
   std::cout << "[INFO] Configuration:\n";
   std::cout << "[INFO]   KNXD_SOCKET           " << knxd_socket << "\n";
   std::cout << "[INFO]   FCGI_SOCKET           "

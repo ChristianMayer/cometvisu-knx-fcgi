@@ -32,7 +32,7 @@ namespace cvknxd {
 /// Returns the application version string (e.g., "1.2.1").
 std::string_view version();
 
-/// Returns the application name ("cometvisu-knxd-fcgi").
+/// Returns the application name ("cometvisu-knx-fcgi").
 std::string_view application_name();
 
 /// Returns the git hash at compile time (e.g., "357f004").

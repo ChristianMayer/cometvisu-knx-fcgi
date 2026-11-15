@@ -1,4 +1,4 @@
-# CometVisu-KnxD FastCGI Backend — Project Plan
+# CometVisu KNX FastCGI Backend — Project Plan
 
 ## 1. Overview
 
@@ -25,7 +25,7 @@ using the **eibd client binary protocol**.
 
 ```
 ┌──────────────┐     HTTP/FCGI      ┌─────────────────────┐     eibd binary      ┌─────────┐
-│  CometVisu   │ ◄────────────────► │  cometvisu-knxd-fcgi │ ◄──────────────────► │  knxd   │
+│  CometVisu   │ ◄────────────────► │  cometvisu-knx-fcgi  │ ◄──────────────────► │  knxd   │
 │  (browser)   │   JSON/FCGI        │  (this project)      │   over Unix socket   │         │
 └──────────────┘                    └─────────────────────┘                      └─────────┘
 ```
@@ -167,7 +167,7 @@ flowchart TD
 ## 5. Project Structure
 
 ```
-cometvisu-knxd-fcgi/
+cometvisu-knx-fcgi/
 ├── CMakeLists.txt                  # Top-level build
 ├── PLAN.md                         # This file
 ├── AGENTS.md                       # Instructions for LLM agents

@@ -457,10 +457,10 @@ TEST_F(FcgiServerSocketTest, ListenOnTcpPortZero) {
 // To manually test the full FCGI protocol over a real socket:
 //
 //   # Terminal 1: start the server with a direct socket
-//   FCGI_SOCKET=/tmp/test-fcgi.sock ./build/src/cometvisu-knxd-fcgi
+//   FCGI_SOCKET=/tmp/test-fcgi.sock ./build/src/cometvisu-knx-fcgi
 //
 //   # Terminal 2: send an FCGI request (using cgi-fcgi or a custom client)
 //   cgi-fcgi -connect /tmp/test-fcgi.sock /l
 //
 // Or use the built-in socket mode with a web server:
-//   FCGI_SOCKET=:9000 ./build/src/cometvisu-knxd-fcgi
+//   FCGI_SOCKET=:9000 ./build/src/cometvisu-knx-fcgi

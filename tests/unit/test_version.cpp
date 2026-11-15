@@ -24,7 +24,7 @@ TEST(VersionTest, ReturnsExpectedVersion) {
 }
 
 TEST(VersionTest, ApplicationName) {
-  EXPECT_EQ(application_name(), "cometvisu-knxd-fcgi");
+  EXPECT_EQ(application_name(), "cometvisu-knx-fcgi");
 }
 
 TEST(VersionTest, VersionStringNotEmpty) {

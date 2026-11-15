@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# fcgi-curl.sh — Send HTTP-style requests to the cometvisu-knxd-fcgi backend
+# fcgi-curl.sh — Send HTTP-style requests to the cometvisu-knx-fcgi backend
 #                via FastCGI, using cgi-fcgi as the protocol bridge.
 #
 # Usage:

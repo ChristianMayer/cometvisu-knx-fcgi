@@ -61,8 +61,8 @@ add_executable(test_worker_supervision
     test_worker_supervision.cpp
 )
 target_compile_definitions(test_worker_supervision PRIVATE
-    CVKNXD_BINARY="$<TARGET_FILE:cometvisu-knxd-fcgi>"
+    CVKNXD_BINARY="$<TARGET_FILE:cometvisu-knx-fcgi>"
 )
-add_dependencies(test_worker_supervision cometvisu-knxd-fcgi)
+add_dependencies(test_worker_supervision cometvisu-knx-fcgi)
 target_link_libraries(test_worker_supervision PRIVATE GTest::gtest GTest::gtest_main)
 add_test(NAME test_worker_supervision COMMAND test_worker_supervision)

@@ -100,11 +100,11 @@ target_include_directories(cvknxd_handlers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cvknxd_handlers PUBLIC cvknxd_knxd cvknxd_state cvknxd_util cvknxd_version)
 
 # ---- Main executable ----
-add_executable(cometvisu-knxd-fcgi
+add_executable(cometvisu-knx-fcgi
     main.cpp
 )
 
-target_link_libraries(cometvisu-knxd-fcgi PRIVATE
+target_link_libraries(cometvisu-knx-fcgi PRIVATE
     cvknxd_version
     cvknxd_fcgi
     cvknxd_router

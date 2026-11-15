@@ -20,6 +20,7 @@
 
 #include "handlers/login_handler.h"
 #include "state/session_store.h"
+#include "version.h"
 
 using namespace cvknxd;
 
@@ -214,7 +215,11 @@ TEST(LoginHandlerTest, ConfigBlockIncludesVersionInfo) {
   std::string response = handler.handle("");
   EXPECT_NE(response.find("\"c\""), std::string::npos);
   EXPECT_NE(response.find("\"fcgiVersion\":"), std::string::npos);
-  EXPECT_NE(response.find("\"fcgiGitHash\":"), std::string::npos);
+  // The git hash is only advertised when the build could determine one:
+  // builds from a source tarball (or a checkout whose ownership git refuses)
+  // have no hash, and then the key must be omitted rather than sent empty.
+  const bool have_git_hash = !git_hash().empty() && git_hash() != "unknown";
+  EXPECT_EQ(response.find("\"fcgiGitHash\":") != std::string::npos, have_git_hash);
 }
 
 TEST(LoginHandlerTest, ConfigBlockWithBaseUrlIncludesVersionInfo) {
@@ -225,7 +230,8 @@ TEST(LoginHandlerTest, ConfigBlockWithBaseUrlIncludesVersionInfo) {
   std::string response = handler.handle("");
   EXPECT_NE(response.find("\"baseURL\":\"/proxy/visu\""), std::string::npos);
   EXPECT_NE(response.find("\"fcgiVersion\":"), std::string::npos);
-  EXPECT_NE(response.find("\"fcgiGitHash\":"), std::string::npos);
+  const bool have_git_hash = !git_hash().empty() && git_hash() != "unknown";
+  EXPECT_EQ(response.find("\"fcgiGitHash\":") != std::string::npos, have_git_hash);
 }
 
 TEST(LoginHandlerTest, LogExtraConfigEnvVar) {

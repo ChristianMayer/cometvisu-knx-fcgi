@@ -1,8 +1,20 @@
-# cometvisu-knxd-fcgi
+# cometvisu-knx-fcgi
 
 FastCGI backend in modern C++ that implements the
 [CometVisu Protocol](https://github.com/CometVisu/CometVisu/wiki/Protocol)
-and connects to a local [knxd](https://github.com/knxd/knxd) daemon.
+and connects to the KNX bus.
+
+Today bus access goes through a local [knxd](https://github.com/knxd/knxd)
+daemon over a Unix socket.  A direct KNXnet/IP transport (IP tunneling and IP
+routing, no knxd required) is planned — see
+[PLAN-KNXNETIP.md](PLAN-KNXNETIP.md).
+
+> **Renamed**: this project was called `cometvisu-knxd-fcgi` up to and including
+> v1.2.1.  The repository now lives at
+> <https://github.com/CometVisu/cometvisu-knx-fcgi> and the binary is named
+> `cometvisu-knx-fcgi`.  Deployments that start the binary by path (`spawn-fcgi`,
+> container entrypoints) must use the new name; a symlink
+> `cometvisu-knxd-fcgi -> cometvisu-knx-fcgi` keeps old setups working.
 
 ## Quick Start
 
@@ -26,6 +38,27 @@ cmake --build build -j$(nproc)
 
 The build expects to find `eibtypes.h` in `<KNXD_SOURCE_DIR>/include/`.
 
+### Development container (recommended)
+
+The repository ships a VS Code dev container with the complete toolchain, so no
+local package installation is needed:
+
+```bash
+# In VS Code: "Dev Containers: Reopen in Container"
+# or from a terminal (needs the devcontainer CLI):
+devcontainer up --workspace-folder .
+```
+
+`.devcontainer/Dockerfile` installs g++/clang/cmake/ninja, clang-format,
+clang-tidy, gdb, `libfcgi-dev`, `knxd` + `knxd-dev` (for the knxd transport) and
+`tcpdump`/`socat`/`iproute2` for KNXnet/IP debugging.  The project is configured
+and built automatically after the container is created; the existing
+`.vscode` tasks and launch configurations work unchanged inside the container.
+
+> For testing against a real KNX IP router, UDP 3671 and the routing multicast
+> group `224.0.23.12` must be reachable from the container — on Linux add
+> `"runArgs": ["--network=host"]` to `.devcontainer/devcontainer.json`.
+
 ### Run tests / Run the server
 
 ```bash
@@ -33,13 +66,13 @@ The build expects to find `eibtypes.h` in `<KNXD_SOURCE_DIR>/include/`.
 ctest --test-dir build --output-on-failure
 
 # Run via spawn-fcgi (traditional FastCGI mode)
-spawn-fcgi -p 9000 -n ./build/src/cometvisu-knxd-fcgi
+spawn-fcgi -p 9000 -n ./build/src/cometvisu-knx-fcgi
 
 # Run standalone (direct socket — no spawn-fcgi needed)
-FCGI_SOCKET=:9000 ./build/src/cometvisu-knxd-fcgi
+FCGI_SOCKET=:9000 ./build/src/cometvisu-knx-fcgi
 
 # Run standalone on a Unix socket
-FCGI_SOCKET=/tmp/cometvisu-fcgi.sock ./build/src/cometvisu-knxd-fcgi
+FCGI_SOCKET=/tmp/cometvisu-fcgi.sock ./build/src/cometvisu-knx-fcgi
 ```
 
 ### Environment variables
@@ -57,7 +90,7 @@ At startup, the server logs the effective values of all configuration
 environment variables to stdout:
 
 ```
-[INFO] cometvisu-knxd-fcgi 1.2.1 starting
+[INFO] cometvisu-knx-fcgi 1.2.1 starting
 [INFO] Configuration:
 [INFO]   KNXD_SOCKET           /run/knx
 [INFO]   FCGI_SOCKET           (not set, spawn-fcgi mode)

@@ -47,7 +47,7 @@
 namespace {
 
 #ifndef CVKNXD_BINARY
-#error "CVKNXD_BINARY must be defined to the cometvisu-knxd-fcgi executable"
+#error "CVKNXD_BINARY must be defined to the cometvisu-knx-fcgi executable"
 #endif
 
 /// Child PIDs whose parent is @p parent (read from /proc/<pid>/stat).

@@ -32,7 +32,7 @@ if(NOT _git_result EQUAL 0 OR GIT_HASH STREQUAL "")
     set(GIT_HASH "unknown")
 endif()
 
-project(cometvisu-knxd-fcgi
+project(cometvisu-knx-fcgi
     VERSION ${PROJECT_VERSION_STRING}
     DESCRIPTION "FastCGI backend bridging CometVisu Protocol to knxd"
     LANGUAGES CXX
@@ -196,4 +196,4 @@ if(BUILD_TESTING)
 endif()
 
 # ---- Install ----
-install(TARGETS cometvisu-knxd-fcgi RUNTIME DESTINATION bin)
+install(TARGETS cometvisu-knx-fcgi RUNTIME DESTINATION bin)

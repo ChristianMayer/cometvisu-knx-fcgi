@@ -1,7 +1,15 @@
 # AGENTS.md — Instructions for LLM Coding Agents
 
 This file provides guidelines for AI coding agents working on the
-`cometvisu-knxd-fcgi` project.
+`cometvisu-knx-fcgi` project.
+
+**Roadmap:** [PLAN-KNXNETIP.md](PLAN-KNXNETIP.md) is the executable, TDD-based
+implementation plan for the direct KNXnet/IP transport (IP tunneling and IP
+routing, no knxd).  Follow its phases in order when working on that feature.
+
+**Development container:** `.devcontainer/` provides the full toolchain
+(g++, clang, cmake, ninja, clang-format, clang-tidy, gdb, `libfcgi-dev`,
+`knxd`/`knxd-dev`, `tcpdump`, `socat`).  Use it for reproducible builds.
 
 ## Development Methodology
 
