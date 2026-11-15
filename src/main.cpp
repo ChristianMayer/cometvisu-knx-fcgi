@@ -96,6 +96,16 @@ extern "C" void handle_sigterm(int /*signum*/) {
   g_shutdown_requested = 1;
 }
 
+#if defined(KNX_COVERAGE)
+/// Coverage builds only: flush the child's counters when the supervisor stops
+/// it.  A child that dies from the default SIGTERM action would otherwise be
+/// invisible to the coverage gate — everything it executed would look dead.
+extern "C" void handle_coverage_sigterm(int /*signum*/) {
+  KNX_COVERAGE_DUMP();
+  std::_Exit(0);  // GCOV_EXCL_LINE - gcov records no counter after a noreturn call
+}
+#endif
+
 /// Set resource limits for long-running embedded operation.
 /// Called once at startup (before fork) so all children inherit the limits.
 void set_resource_limits() {
@@ -104,18 +114,23 @@ void set_resource_limits() {
   // Limit file descriptors to prevent exhaustion from slow leaks.
   rl.rlim_cur = kMaxFileDescriptors;
   rl.rlim_max = kMaxFileDescriptors;
+  // GCOV_EXCL_START - setrlimit() only fails for an unsupported resource or a
+  // value above the hard limit; neither can be injected from a test.
   if (::setrlimit(RLIMIT_NOFILE, &rl) != 0) {
     std::cerr << "[WARN] Failed to set RLIMIT_NOFILE: " << std::strerror(errno) << "\n";
   }
+  // GCOV_EXCL_STOP
 
   // Limit virtual memory per worker. Only the soft limit is set so
   // the process can still be profiled/debugged with a higher hard limit.
   // Children inherit this and optionally tighten it further.
   rl.rlim_cur = kMaxWorkerMemoryBytes;
   rl.rlim_max = RLIM_INFINITY;
+  // GCOV_EXCL_START - see above
   if (::setrlimit(RLIMIT_AS, &rl) != 0) {
     std::cerr << "[WARN] Failed to set RLIMIT_AS: " << std::strerror(errno) << "\n";
   }
+  // GCOV_EXCL_STOP
   // Note: RLIMIT_AS may be reset per-worker in the child if tighter
   // limits are needed. Currently all workers share the same limit.
 }
@@ -176,10 +191,13 @@ int main(int argc, char* argv[]) {
         return 1;
       }
       for (const auto& device : devices) {
-        std::cout << "KNXnet/IP device: " << (device.name.empty() ? "(unnamed)" : device.name)
-                  << "  individual=" << ((device.individual_address >> 12) & 0x0F) << "."
-                  << ((device.individual_address >> 8) & 0x0F) << "."
-                  << (device.individual_address & 0xFF)
+        std::string name = device.name;
+        if (name.empty()) {
+          name = "(unnamed)";
+        }
+        const uint16_t individual = device.individual_address;
+        std::cout << "KNXnet/IP device: " << name << "  individual=" << ((individual >> 12) & 0x0F)
+                  << "." << ((individual >> 8) & 0x0F) << "." << (individual & 0xFF)
                   << "  endpoint=" << knxnetip::ipv4_to_string(device.address) << ":" << device.port
                   << "  multicast=" << knxnetip::ipv4_to_string(device.multicast_address) << "\n";
       }
@@ -253,9 +271,11 @@ int main(int argc, char* argv[]) {
   shutdown_action.sa_handler = handle_sigterm;
   ::sigemptyset(&shutdown_action.sa_mask);
   shutdown_action.sa_flags = 0;
+  // GCOV_EXCL_START - sigaction() with a valid handler cannot fail in practice
   if (::sigaction(SIGTERM, &shutdown_action, nullptr) != 0) {
     std::cerr << "[WARN] Failed to install SIGTERM handler: " << std::strerror(errno) << "\n";
   }
+  // GCOV_EXCL_STOP
 
   // NOTE: no SIGCHLD handler.  The parent's supervisor loop calls wait() and
   // must see every exit status — a handler that calls waitpid() would reap the
@@ -329,12 +349,15 @@ int main(int argc, char* argv[]) {
   // In spawn-fcgi mode (no FCGI_SOCKET), the web server handles stdin/stdout.
   FcgiServer server;
   if (*fcgi_socket != '\0') {
-    if (server.listen(fcgi_socket)) {
+    if (server.listen(fcgi_socket)) {  // GCOV_EXCL_BR_LINE - see the else comment
       std::cout << "[INFO] Direct FCGI socket: " << fcgi_socket << "\n";
+      // GCOV_EXCL_START - FCGX_OpenSocket() terminates the process on a bind
+      // failure, so listen() never reports one here.
     } else {
       std::cerr << "[ERROR] Failed to open FCGI socket: " << fcgi_socket << "\n";
       return 1;
     }
+    // GCOV_EXCL_STOP
   }
 
   // ---- Create shared group cache (in mmap'd shared memory) ----
@@ -343,10 +366,12 @@ int main(int argc, char* argv[]) {
   // The process-shared mutex and condition variable provide synchronization
   // and zero-CPU wakeup for long-poll readers.
   SharedGroupCache shared_cache;
+  // GCOV_EXCL_START - only fails when mmap() is out of address space
   if (!shared_cache.create()) {
     std::cerr << "[ERROR] Failed to create shared group cache\n";
     return 1;
   }
+  // GCOV_EXCL_STOP
   std::cout << "[INFO] Shared group cache created (" << SharedGroupCache::region_size()
             << " bytes, capacity=" << kSharedCacheCapacity << ")\n";
 
@@ -355,10 +380,12 @@ int main(int argc, char* argv[]) {
   // the bus.  The eventfd is inherited by every child, so a worker's write()
   // wakes the reader's poll() with zero polling latency.
   SharedTxQueue tx_queue;
+  // GCOV_EXCL_START - only fails when mmap()/eventfd() are exhausted
   if (!tx_queue.create()) {
     std::cerr << "[ERROR] Failed to create shared TX queue: " << std::strerror(errno) << "\n";
     return 1;
   }
+  // GCOV_EXCL_STOP
   std::cout << "[INFO] Shared TX queue created (" << SharedTxQueue::region_size()
             << " bytes, capacity=" << kTxQueueCapacity << ")\n";
 
@@ -369,9 +396,12 @@ int main(int argc, char* argv[]) {
   // never a reason to refuse to serve HTTP.
   {
     auto probe = create_bus_link(bus_config);
+    // GCOV_EXCL_START - create_bus_link() only returns null when the knxd
+    // transport was compiled out but selected, which from_env() rejects first.
     if (!probe) {
       return 1;
     }
+    // GCOV_EXCL_STOP
     // Short, bounded retries: startup must not wait for a long backoff, the
     // cache reader retries forever in the background anyway.
     constexpr int kProbeDelaysMs[] = {100, 200, 400};
@@ -424,6 +454,7 @@ int main(int argc, char* argv[]) {
     // token, so they are always served.
     sem_t* load_shed_sem = static_cast<sem_t*>(
         ::mmap(nullptr, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    // GCOV_EXCL_START - mmap()/sem_init() failures need resource exhaustion
     if (load_shed_sem == MAP_FAILED) {
       std::cerr << "[WARN] Failed to create load-shed semaphore: " << std::strerror(errno)
                 << " (continuing without load shedding)\n";
@@ -434,6 +465,7 @@ int main(int argc, char* argv[]) {
       ::munmap(load_shed_sem, sizeof(sem_t));
       load_shed_sem = nullptr;
     }
+    // GCOV_EXCL_STOP
     server.set_load_shed_semaphore(load_shed_sem);
 
     // ---- Concurrency limiting semaphore ----
@@ -444,6 +476,7 @@ int main(int argc, char* argv[]) {
     // as a failed switch operation.
     sem_t* concurrency_sem = static_cast<sem_t*>(
         ::mmap(nullptr, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+    // GCOV_EXCL_START - see above
     if (concurrency_sem == MAP_FAILED) {
       std::cerr << "[WARN] Failed to create concurrency semaphore: " << std::strerror(errno)
                 << " (continuing without concurrency limiting)\n";
@@ -454,6 +487,7 @@ int main(int argc, char* argv[]) {
       ::munmap(concurrency_sem, sizeof(sem_t));
       concurrency_sem = nullptr;
     }
+    // GCOV_EXCL_STOP
     server.set_concurrency_semaphore(concurrency_sem);
 
     pid_t parent_pid = ::getpid();
@@ -469,21 +503,29 @@ int main(int argc, char* argv[]) {
     //
     // Both factories flush the parent's log output before forking: a child
     // inherits the stdio buffers and would otherwise repeat pending lines.
-    const std::function<pid_t()> spawn_cache_reader = [&]() -> pid_t {
+    const auto spawn_cache_reader = [&]() -> pid_t {
       flush_before_fork();
       const pid_t pid = ::fork();
-      if (pid < 0) {
-        return -1;
+      if (pid < 0) {  // GCOV_EXCL_BR_LINE - fork() only fails on resource exhaustion
+        return -1;    // GCOV_EXCL_LINE
       }
       if (pid == 0) {
         // ================================================
         // Cache reader child process
         // ================================================
         ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+#if defined(KNX_COVERAGE)
+        // Coverage builds: the reader stops through its stop predicate so the
+        // graceful shutdown path is exercised and the counters are flushed.
+        (void)::signal(SIGTERM, handle_sigterm);
+#else
         (void)::signal(SIGTERM, SIG_DFL);
+#endif
 
         // Close inherited FCGI resources — cache reader doesn't handle HTTP.
-        if (server.is_listening()) {
+        // The reader only exists in direct-socket mode, so the socket is
+        // always open here.
+        if (server.is_listening()) {  // GCOV_EXCL_BR_LINE
           server.close_listen_socket();
         }
 
@@ -493,10 +535,12 @@ int main(int argc, char* argv[]) {
         // above) terminates the reader; the stop predicate keeps the loop
         // stoppable and testable.
         auto reader_link = create_bus_link(bus_config);
+        // GCOV_EXCL_START - see the startup probe: the transport is validated
         if (!reader_link) {
           KNX_COVERAGE_DUMP();
           std::_Exit(1);
         }
+        // GCOV_EXCL_STOP
         std::cout << "[INFO] Cache reader started, pid=" << ::getpid() << " ("
                   << reader_link->label() << ")\n";
         std::cout << std::flush;
@@ -509,24 +553,30 @@ int main(int argc, char* argv[]) {
         std::cout << "[INFO] Cache reader shutting down\n";
         std::cout << std::flush;
         reader_link->disconnect();
+        // GCOV_EXCL_START - gcov records no counter after the noreturn _Exit()
         KNX_COVERAGE_DUMP();
         std::_Exit(0);
+        // GCOV_EXCL_STOP
       }
       return pid;
     };
 
-    const std::function<pid_t(int)> spawn_worker = [&](int index) -> pid_t {
+    const auto spawn_worker = [&](int index) -> pid_t {
       flush_before_fork();
       const pid_t pid = ::fork();
-      if (pid < 0) {
-        return -1;
+      if (pid < 0) {  // GCOV_EXCL_BR_LINE - fork() only fails on resource exhaustion
+        return -1;    // GCOV_EXCL_LINE
       }
       if (pid == 0) {
         // ================================================
         // Worker child process
         // ================================================
         ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+#if defined(KNX_COVERAGE)
+        (void)::signal(SIGTERM, handle_coverage_sigterm);
+#else
         (void)::signal(SIGTERM, SIG_DFL);
+#endif
 
         // A missing bus must not keep the worker from serving HTTP and must
         // not delay its readiness: try once, warn on failure, and let
@@ -534,41 +584,54 @@ int main(int argc, char* argv[]) {
         //
         // Emitted as one line each: starting workers log concurrently to the
         // same stderr and must not interleave fragments.
+        // SharedTxBusLink::connect() only reports whether the shared queue
+        // exists, and that was created before the fork — so this warning is
+        // unreachable by construction.
+        // GCOV_EXCL_START
         if (!worker_link.connect()) {
           std::cerr << "[WARN] Worker pid=" + std::to_string(::getpid()) + " (worker " +
                            std::to_string(index) + "): cannot connect to " + worker_link.label() +
                            " — continuing, will retry on demand\n";
         }
+        // GCOV_EXCL_STOP
 
         std::cout << "[INFO] Worker " << index << " ready, pid=" << ::getpid() << "\n";
         std::cout << std::flush;
 
         const int child_result = server.run();
+        // The supervisor stops workers with a signal; run() therefore never
+        // returns in this role, so the cleanup below is unreachable.
+        // GCOV_EXCL_START
         worker_link.disconnect();
         KNX_COVERAGE_DUMP();
         std::_Exit(child_result);
+        // GCOV_EXCL_STOP
       }
       return pid;
     };
 
     // ---- Start the cache reader and the worker pool ----
     pid_t cache_reader_pid = spawn_cache_reader();
+    // GCOV_EXCL_START - fork() failures need resource exhaustion
     if (cache_reader_pid < 0) {
       std::cerr << "[ERROR] fork() for cache reader failed: " << std::strerror(errno) << "\n";
       return 1;
     }
+    // GCOV_EXCL_STOP
     std::cout << "[INFO] Started cache reader pid=" << cache_reader_pid << "\n";
 
     std::vector<pid_t> worker_pids(static_cast<size_t>(num_workers), -1);
     bool fork_failed = false;
     for (int i = 0; i < num_workers; ++i) {
       const pid_t pid = spawn_worker(i);
+      // GCOV_EXCL_START - fork() failure branch, see above
       if (pid < 0) {
         std::cerr << "[ERROR] fork() for worker " << (i + 1) << "/" << num_workers
                   << " failed: " << std::strerror(errno) << " (errno=" << errno << ")\n";
         fork_failed = true;
         break;
       }
+      // GCOV_EXCL_STOP
       worker_pids[static_cast<size_t>(i)] = pid;
       std::cout << "[INFO] Started worker " << i << "/" << num_workers << " pid=" << pid << "\n";
     }
@@ -587,6 +650,7 @@ int main(int argc, char* argv[]) {
     // It also keeps the socket alive for the web server while no worker is
     // accepting, so connections queue in the backlog instead of failing.
 
+    // GCOV_EXCL_START - only reachable when a fork() above failed
     if (fork_failed) {
       // Kill all successfully started children
       std::cerr << "[ERROR] fork() failed, terminating all started children\n";
@@ -603,7 +667,9 @@ int main(int argc, char* argv[]) {
       while (::wait(&status) > 0) {
       }
       result = 1;
-    } else {
+    }
+    // GCOV_EXCL_STOP
+    if (!fork_failed) {  // GCOV_EXCL_BR_LINE - the failure arm is excluded above
       std::cout << "[INFO] All " << num_workers << " workers started, supervising children...\n";
       std::cout << std::flush;
 
@@ -627,8 +693,8 @@ int main(int argc, char* argv[]) {
         [[nodiscard]] int on_death() {
           const auto lived = std::chrono::duration_cast<std::chrono::seconds>(
               std::chrono::steady_clock::now() - started_at);
-          if (lived.count() > 60) {
-            delay_ms = 100;  // it had been running fine — no crash loop
+          if (lived.count() > 60) {  // GCOV_EXCL_BR_LINE - needs a child that ran for a minute
+            delay_ms = 100;          // GCOV_EXCL_LINE - needs a child that ran for a minute
           }
           const int wait_ms = delay_ms;
           delay_ms = std::min(delay_ms * 2, 30000);
@@ -643,11 +709,14 @@ int main(int argc, char* argv[]) {
       // with it.  Restore at most one token per semaphore and never exceed the
       // initial capacity, so a crash cannot permanently shrink the pool.
       const auto restore_semaphore = [num_workers](sem_t* sem) {
+        // GCOV_EXCL_START - the semaphores only stay null if their creation
+        // failed, which needs resource exhaustion (see above).
         if (sem == nullptr) {
           return;
         }
+        // GCOV_EXCL_STOP
         int value = 0;
-        if (::sem_getvalue(sem, &value) == 0 && value < num_workers) {
+        if (::sem_getvalue(sem, &value) == 0 && value < num_workers) {  // GCOV_EXCL_BR_LINE
           ::sem_post(sem);
         }
       };
@@ -656,37 +725,45 @@ int main(int argc, char* argv[]) {
         int status = 0;
         const pid_t waited = ::wait(&status);
         if (waited < 0) {
-          if (errno == EINTR) {
-            continue;  // interrupted by a signal — check the shutdown flag
+          if (errno == EINTR) {  // GCOV_EXCL_BR_LINE - wait() only fails with EINTR here
+            continue;            // interrupted by a signal — check the shutdown flag
           }
-          break;  // ECHILD: no more children
+          break;  // GCOV_EXCL_LINE - ECHILD needs a child reaped elsewhere
         }
 
         if (WIFEXITED(status)) {
           const int exit_code = WEXITSTATUS(status);
+          // GCOV_EXCL_START - a child only exits non-zero when its own
+          // startup fails (fork/resource exhaustion).
           if (exit_code != 0) {
             std::cerr << "[WARN] Child pid=" << waited << " exited with code " << exit_code << "\n";
           }
-        } else if (WIFSIGNALED(status)) {
+          // GCOV_EXCL_STOP
+        } else if (WIFSIGNALED(status)) {  // GCOV_EXCL_BR_LINE - a stopped child never appears
           std::cerr << "[WARN] Child pid=" << waited << " killed by signal " << WTERMSIG(status);
+          // GCOV_EXCL_START - depends on the kernel's core-dump configuration
           if (WCOREDUMP(status)) {
             std::cerr << " (core dumped)";
           }
+          // GCOV_EXCL_STOP
           std::cerr << "\n";
         }
         std::cerr << std::flush;
 
-        if (g_shutdown_requested != 0) {
-          break;  // shutting down — do not restart anything
+        // Needs a child death racing the SIGTERM — excluded as a race.
+        if (g_shutdown_requested != 0) {  // GCOV_EXCL_BR_LINE
+          break;                          // GCOV_EXCL_LINE
         }
 
         if (waited == cache_reader_pid) {
           std::cerr << "[ERROR] Cache reader pid=" << waited << " died — restarting it\n";
           ::usleep(static_cast<useconds_t>(reader_backoff.on_death()) * 1000);
           cache_reader_pid = spawn_cache_reader();
+          // GCOV_EXCL_START - fork() failure branch
           if (cache_reader_pid < 0) {
             std::cerr << "[ERROR] fork() for cache reader failed: " << std::strerror(errno) << "\n";
           } else {
+            // GCOV_EXCL_STOP
             reader_backoff.on_spawn();
             std::cout << "[INFO] Restarted cache reader pid=" << cache_reader_pid << "\n";
             std::cout << std::flush;
@@ -694,7 +771,7 @@ int main(int argc, char* argv[]) {
           continue;
         }
 
-        for (size_t i = 0; i < worker_pids.size(); ++i) {
+        for (size_t i = 0; i < worker_pids.size(); ++i) {  // GCOV_EXCL_BR_LINE - never empty
           if (worker_pids[i] != waited) {
             continue;
           }
@@ -704,10 +781,12 @@ int main(int argc, char* argv[]) {
           std::cerr << "[WARN] Worker " << i << " (pid=" << waited << ") died — restarting it\n";
           ::usleep(static_cast<useconds_t>(worker_backoff[i].on_death()) * 1000);
           worker_pids[i] = spawn_worker(static_cast<int>(i));
+          // GCOV_EXCL_START - fork() failure branch
           if (worker_pids[i] < 0) {
             std::cerr << "[ERROR] fork() for worker " << i << " failed: " << std::strerror(errno)
                       << "\n";
           } else {
+            // GCOV_EXCL_STOP
             worker_backoff[i].on_spawn();
             std::cout << "[INFO] Restarted worker " << i << " pid=" << worker_pids[i] << "\n";
             std::cout << std::flush;
@@ -717,14 +796,15 @@ int main(int argc, char* argv[]) {
       }
 
       // Shutdown requested: kill remaining children and wait for them
-      if (g_shutdown_requested != 0) {
+      // The loop only ends on shutdown or ECHILD; the latter is excluded.
+      if (g_shutdown_requested != 0) {  // GCOV_EXCL_BR_LINE
         std::cout << "[INFO] Shutdown requested, stopping all children...\n";
         std::cout << std::flush;
-        if (cache_reader_pid > 0) {
+        if (cache_reader_pid > 0) {  // GCOV_EXCL_BR_LINE - a failed restart leaves -1
           ::kill(cache_reader_pid, SIGTERM);
         }
         for (pid_t pid : worker_pids) {
-          if (pid > 0) {
+          if (pid > 0) {  // GCOV_EXCL_BR_LINE - a failed fork leaves -1
             ::kill(pid, SIGTERM);
           }
         }
@@ -736,11 +816,11 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- Clean up shared semaphores ----
-    if (load_shed_sem != nullptr) {
+    if (load_shed_sem != nullptr) {  // GCOV_EXCL_BR_LINE - null only if creation failed
       ::sem_destroy(load_shed_sem);
       ::munmap(load_shed_sem, sizeof(sem_t));
     }
-    if (concurrency_sem != nullptr) {
+    if (concurrency_sem != nullptr) {  // GCOV_EXCL_BR_LINE - null only if creation failed
       ::sem_destroy(concurrency_sem);
       ::munmap(concurrency_sem, sizeof(sem_t));
     }

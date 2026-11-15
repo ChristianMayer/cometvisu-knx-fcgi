@@ -126,8 +126,9 @@ bool TunnelingBusLink::connect() {
   struct sockaddr_in bound {};
   socklen_t bound_len = sizeof(bound);
   std::uint16_t bound_port = 0;
-  if (::getsockname(fd_, reinterpret_cast<struct sockaddr*>(&bound), &bound_len) ==
-      0) {  // GCOV_EXCL_BR_LINE - a bound socket always answers
+  auto* bound_ptr = reinterpret_cast<struct sockaddr*>(&bound);
+  // A socket that was just bound always answers; the failure arm is defensive.
+  if (::getsockname(fd_, bound_ptr, &bound_len) == 0) {  // GCOV_EXCL_BR_LINE
     bound_port = ntohs(bound.sin_port);
   }
   set_nonblocking(true);
@@ -139,10 +140,11 @@ bool TunnelingBusLink::connect() {
   const auto request = knxnetip::build_connect_request(hpai, hpai);
 
   if (!send_to_device(request)) {  // GCOV_EXCL_BR_LINE - a local sendto() does not fail
-    std::cerr << "[ERROR] Cannot send KNXnet/IP CONNECT_REQUEST: " << std::strerror(errno)
-              << "\n";  // GCOV_EXCL_LINE
-    disconnect();       // GCOV_EXCL_LINE
-    return false;       // GCOV_EXCL_LINE
+    // GCOV_EXCL_START - unreachable: a connected UDP socket does not fail here
+    std::cerr << "[ERROR] Cannot send KNXnet/IP CONNECT_REQUEST\n";
+    disconnect();
+    return false;
+    // GCOV_EXCL_STOP
   }
 
   // ---- Wait for the CONNECT_RESPONSE (bounded deadline, never hang) ----
@@ -232,9 +234,10 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
   for (int attempt = 0; attempt <= options_.retries; ++attempt) {
     const auto request = knxnetip::build_tunnelling_request(channel_, tx_sequence_, cemi);
     if (!send_to_device(request)) {  // GCOV_EXCL_BR_LINE - a local sendto() does not fail
-      std::cerr << "[WARN] KNXnet/IP tunnel send failed: " << std::strerror(errno)
-                << "\n";  // GCOV_EXCL_LINE
-      return false;       // GCOV_EXCL_LINE
+      // GCOV_EXCL_START - unreachable: a connected UDP socket does not fail here
+      std::cerr << "[WARN] KNXnet/IP tunnel send failed\n";
+      return false;
+      // GCOV_EXCL_STOP
     }
 
     ack_received_ = false;

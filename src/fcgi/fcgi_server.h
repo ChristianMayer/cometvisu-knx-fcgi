@@ -162,8 +162,12 @@ private:
   /// FcgiRequest.  Thread-safe: uses the passed envp directly instead of
   /// the global environ pointer, avoiding races when multiple threads
   /// would overwrite environ concurrently.
+  ///
+  /// Not static: the request body is read from this request's FCGX stdin
+  /// stream (`request_.in`), which belongs to the connection being served.
+  ///
   /// @param envp  FCGI parameter array (FCGX_Request::envp).
-  [[nodiscard]] static FcgiRequest read_request(char** envp);
+  [[nodiscard]] FcgiRequest read_request(char** envp);
 
   /// Write an FcgiResponse to the appropriate output stream.
   /// Uses FCGX_Request::out when in direct socket mode, FCGI stdout otherwise.

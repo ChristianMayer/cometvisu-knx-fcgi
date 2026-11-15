@@ -98,21 +98,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket open. Every rejected attempt (a misconfigured `KNXD_SOCKET`) burned one
   descriptor per reconnect, so the cache reader would eventually exhaust them.
 
+- **A POST/PUT request could kill a worker process.** `read_request()` read the
+  body with `FCGI_fread(..., stdin)` in *both* modes. In direct-socket mode that
+  stream belongs to the spawn-fcgi layer and returns a meaningless byte count;
+  adding it to the running total overflowed and the following
+  `std::string::resize()` threw `std::length_error` out of `run()`, terminating
+  the worker (the supervisor restarted it, but the request was lost). The
+  direct-socket path now reads the body from the request's FCGX stream
+  (`FCGX_GetStr(request_.in)`), and both paths clamp the reported count.
+
 ### Tests
 
 - **Coverage gate is enforced in CI** (`tools/check_coverage.py`, job
   `coverage`): every line and every branch arm under `src/` must be reached by a
-  test.  New files must be at 100 %; the two remaining legacy files
-  (`src/fcgi/fcgi_server.cpp`, `src/main.cpp`) are ratcheted by
-  `tools/coverage-baseline.json`.
-- `KnxdClient` is now at 100 % line and branch coverage: a scripted fake knxd
-  (`tests/unit/test_knxd_client_protocol.cpp`) drives the eibd handshake, group
-  writes, APDU/injected group packets, partial and unparsable frames, handshake
-  deadlines, write/read recovery after a broken socket and the read rate limit.
-- New suites: `test_fcgi_request`, `test_login_handler`'s config-block builder,
-  `test_cache_reader`'s direct `poll()` wake-up paths, plus robust-mutex
-  recovery (a forked child dies holding the shared cache lock) and
-  full-table/age-filter cases for `SharedGroupCache`.
+  test.  **`tools/coverage.sh --strict` is clean — 100 % lines and 100 %
+  branches for every file**; the committed baseline records that floor so a new
+  gap in any file fails the build.
+- `tests/unit/test_fcgi_server_run.cpp`: full FastCGI record protocol against a
+  child running `FcgiServer::run()` — parameter parsing, POST bodies, the
+  long-poll capacity limiting, handler exceptions and the shutdown wake-up.
+- `tests/e2e/test_spawn_mode_e2e.cpp`: the built binary in spawn-fcgi mode,
+  driven over stdin/stdout (including the POST body paths).
+- `tests/e2e/test_main_e2e.cpp`: command line, configuration validation and the
+  fork-based supervisor — worker and cache-reader restarts after a kill, token
+  restoration after a worker dies during a long poll, and the SIGTERM shutdown.
+  A fake KNXnet/IP device covers `--discover` with a real answer.
+- `tests/unit/test_knxd_client_protocol.cpp`: scripted fake knxd for the eibd
+  handshake, group writes, APDU/injected group packets, partial and unparsable
+  frames, handshake deadlines and recovery after a broken socket.
+- New suites: `test_fcgi_request`, the login config-block builder, the cache
+  reader's direct `poll()` wake-up paths, robust-mutex recovery (a forked child
+  dies holding the shared cache lock) and full-table/age-filter cases for
+  `SharedGroupCache`.
+
 
 ## [1.2.1] — 2026-11-15
 

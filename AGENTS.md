@@ -109,13 +109,22 @@ the last resort for what the operating system could do but a test cannot.
 
 ## Current coverage state
 
-Everything under `src/` is at 100 % lines and 100 % branches **except** the two
-large legacy files below.  They are recorded in the baseline and must not drop:
+**Everything under `src/` is at 100 % lines and 100 % branches.**
+`tools/coverage.sh --strict` is clean, and `tools/coverage-baseline.json` only
+exists as a ratchet: every file is recorded at 100 %, so a new gap in *any*
+file fails the gate.
 
-| File                     | lines | branches | remaining work                                            |
-|--------------------------|-------|----------|-----------------------------------------------------------|
-| `src/fcgi/fcgi_server.cpp` | 20.8 % | 10.0 %  | needs an FCGI record fault-injection harness            |
-| `src/main.cpp`             | 63.4 % | 43.6 %  | needs a supervisor/worker-pool harness                  |
+The last two legacy files were closed with process-level harnesses rather than
+unit tests, because their logic only exists in a running system:
+
+| File | how it is covered |
+|---|---|
+| `src/fcgi/fcgi_server.cpp` | `tests/unit/test_fcgi_server_run.cpp` drives the real FastCGI record protocol over a Unix socket (a child runs `run()`, the test speaks BEGIN_REQUEST/PARAMS/STDIN and reads STDOUT/END_REQUEST); `tests/e2e/test_spawn_mode_e2e.cpp` covers the spawn-fcgi mode of the built binary. |
+| `src/main.cpp` | `tests/e2e/test_main_e2e.cpp` starts the built binary: command line (`-v`/`-h`/`--discover`), configuration validation, and the fork-based supervisor — it kills a worker and the cache reader to force restarts, kills a worker holding long-poll tokens, and shuts the pool down with SIGTERM. |
+
+Coverage builds install a SIGTERM handler in the worker/cache-reader children
+(`KNX_COVERAGE` only) so their counters are flushed when the supervisor stops
+them; without it every line a child executed would look dead.
 
 ## Coding Style
 

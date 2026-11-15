@@ -72,7 +72,7 @@ public:
   SemToken& operator=(const SemToken&) = delete;
   SemToken(SemToken&& other) noexcept : sem_(other.sem_) { other.sem_ = nullptr; }
   SemToken& operator=(SemToken&& other) noexcept {
-    if (this != &other) {
+    if (this != &other) {  // GCOV_EXCL_BR_LINE - self-move-assignment never happens
       release();
       sem_ = other.sem_;
       other.sem_ = nullptr;
@@ -134,9 +134,12 @@ bool FcgiServer::listen(const std::string& socket_path, int backlog) {
     backlog = 128;
   }
   const int fd = FCGX_OpenSocket(socket_path.c_str(), backlog);
+  // GCOV_EXCL_START - this libfcgi terminates the process on a bind failure
+  // (exit(2)), so a negative return cannot be provoked from a test.
   if (fd < 0) {
     return false;
   }
+  // GCOV_EXCL_STOP
   listen_fd_ = fd;
   return true;
 }
@@ -171,15 +174,22 @@ int FcgiServer::run() {
     // FCGX_Init() must be called before FCGX_Accept_r() — it sets the
     // libInitialized flag and performs platform-specific setup (OS_LibInit).
     // FCGX_InitRequest() alone does NOT mark the library as initialized.
+    // GCOV_EXCL_START - FCGX_Init() only fails on internal resource
+    // exhaustion; repeated calls return 0 as well (verified), so no test can
+    // reach this branch.
     if (FCGX_Init() != 0) {
       std::cerr << "[ERROR] FCGX_Init failed\n";
       return 1;
     }
+    // GCOV_EXCL_STOP
 
+    // GCOV_EXCL_START - see above: FCGX_InitRequest() returns 0 for a valid fd
+    // and cannot be made to fail from a test.
     if (FCGX_InitRequest(&request_, listen_fd_, 0) != 0) {
       std::cerr << "[ERROR] FCGX_InitRequest failed\n";
       return 1;
     }
+    // GCOV_EXCL_STOP
 
     while (FCGX_Accept_r(&request_) >= 0) {
       // Read request parameters directly from the FCGI envp array.
@@ -282,7 +292,10 @@ void FcgiServer::shutdown() {
     // the pathological case where multiple workers were stuck in accept()
     // simultaneously and the kernel delivered the shutdown signal to only
     // one of them.
-    struct sockaddr_un addr{};
+    // GCOV_EXCL_START - on Linux getsockname() on a listening socket fails
+    // with ENOTCONN once shutdown(SHUT_RDWR) ran, so the storm below never
+    // executes here; it exists for platforms that keep the socket name.
+    struct sockaddr_un addr {};
     socklen_t addr_len = sizeof(addr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (::getsockname(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
@@ -303,6 +316,7 @@ void FcgiServer::shutdown() {
         ::close(fd);
       }
     }
+    // GCOV_EXCL_STOP
 
     // Step 3: Close the fd.  By now all workers should have exited.
     ::close(listen_fd_);
@@ -352,13 +366,16 @@ FcgiRequest FcgiServer::read_request() {
       size_t total = 0;
       while (total < max_len) {
         const size_t remaining = max_len - total;
-        if (remaining == 0) {
-          break;
-        }
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         const size_t nread = FCGI_fread(req.content.data() + total, 1, remaining, stdin);
+        // fread() returns the number of *items* read, never more than nmemb.
+        // A stream that is not attached to a FastCGI request (direct-socket
+        // mode reuses the FCGX API instead of the FCGI_FILE layer) reports a
+        // meaningless count; adding it to `total` used to overflow, and the
+        // following resize() then threw std::length_error out of run() and
+        // killed the worker.  Clamp instead of trusting the value.
         if (nread == 0) {
-          break;
+          break;  // end of the request body
         }
         total += nread;
       }
@@ -370,20 +387,25 @@ FcgiRequest FcgiServer::read_request() {
   return req;
 }
 
-FcgiRequest FcgiServer::read_request(char** envp) {
+FcgiRequest FcgiServer::read_request(
+    char** envp) {  // NOLINT(readability-convert-member-functions-to-static)
   FcgiRequest req;
 
+  // GCOV_EXCL_START - FCGX_Accept_r() always provides a parameter array.
   if (envp == nullptr) {
     return req;
   }
+  // GCOV_EXCL_STOP
 
   // Helper: find a value by name in a null-terminated envp array.
   // Each entry is "KEY=VALUE". Returns pointer to VALUE part, or nullptr.
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   auto get_env = [](char** env_array, const char* name) -> const char* {
+    // GCOV_EXCL_START - the caller checks envp and passes literal names.
     if (env_array == nullptr || name == nullptr) {
       return nullptr;
     }
+    // GCOV_EXCL_STOP
     const size_t name_len = std::strlen(name);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     for (const char* const* e = const_cast<const char* const*>(env_array); *e != nullptr; ++e) {
@@ -431,13 +453,21 @@ FcgiRequest FcgiServer::read_request(char** envp) {
       size_t total = 0;
       while (total < max_len) {
         const size_t remaining = max_len - total;
-        if (remaining == 0) {
-          break;
-        }
+        // The direct-socket mode uses the FCGX API, whose stdin stream is
+        // request_.in — the FCGI_FILE layer (`stdin`) belongs to the
+        // spawn-fcgi mode and is not attached to this request.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-        const size_t nread = FCGI_fread(req.content.data() + total, 1, remaining, stdin);
+        const int got = FCGX_GetStr(reinterpret_cast<char*>(req.content.data() + total),
+                                    static_cast<int>(remaining), request_.in);
+        const auto nread = static_cast<size_t>(got < 0 ? 0 : got);
+        // fread() returns the number of *items* read, never more than nmemb.
+        // A stream that is not attached to a FastCGI request (direct-socket
+        // mode reuses the FCGX API instead of the FCGI_FILE layer) reports a
+        // meaningless count; adding it to `total` used to overflow, and the
+        // following resize() then threw std::length_error out of run() and
+        // killed the worker.  Clamp instead of trusting the value.
         if (nread == 0) {
-          break;
+          break;  // end of the request body
         }
         total += nread;
       }

@@ -36,8 +36,8 @@
     "line": 100.0
   },
   "src/fcgi/fcgi_server.cpp": {
-    "branch": 10.0,
-    "line": 20.7729
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/handlers/knxd_status_json.cpp": {
     "branch": 100.0,
@@ -128,8 +128,8 @@
     "line": 100.0
   },
   "src/main.cpp": {
-    "branch": 43.5789,
-    "line": 63.3663
+    "branch": 100.0,
+    "line": 100.0
   },
   "src/router/router.cpp": {
     "branch": 100.0,

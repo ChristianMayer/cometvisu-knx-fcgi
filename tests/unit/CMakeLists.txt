@@ -90,6 +90,12 @@ add_executable(test_fcgi_request
 target_link_libraries(test_fcgi_request PRIVATE cvknx_fcgi GTest::gtest GTest::gtest_main)
 add_test(NAME test_fcgi_request COMMAND test_fcgi_request)
 
+add_executable(test_fcgi_server_run
+    test_fcgi_server_run.cpp
+)
+target_link_libraries(test_fcgi_server_run PRIVATE cvknx_fcgi cvknx_util GTest::gtest GTest::gtest_main)
+add_test(NAME test_fcgi_server_run COMMAND test_fcgi_server_run)
+
 add_executable(test_knxd_connector
     test_knxd_connector.cpp
 )
