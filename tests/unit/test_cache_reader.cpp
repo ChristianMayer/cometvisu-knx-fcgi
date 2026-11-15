@@ -33,7 +33,7 @@
 #include <thread>
 
 #include "../../mocks/mock_bus_link.h"
-#include "../../src/knxd/cache_reader.h"
+#include "../../src/bus/cache_reader.h"
 #include "../../src/state/shared_group_cache.h"
 #include "../../src/state/shared_tx_queue.h"
 

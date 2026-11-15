@@ -14,8 +14,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
- * @file knxd_status_json.h
- * @brief Report a knxd outage to the client in /r and /w responses.
+ * @file bus_status_json.h
+ * @brief Report a bus outage to the client in /r and /w responses.
  *
  * The cache keeps serving the last known values while the bus connection is
  * unreachable, so /r looks perfectly healthy — the client would never notice

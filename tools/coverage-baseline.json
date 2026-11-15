@@ -19,6 +19,14 @@
     "branch": 100.0,
     "line": 100.0
   },
+  "src/bus/cache_reader.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/bus/cache_reader.h": {
+    "branch": 100.0,
+    "line": 100.0
+  },
   "src/bus/shared_tx_bus_link.cpp": {
     "branch": 100.0,
     "line": 100.0
@@ -39,7 +47,7 @@
     "branch": 100.0,
     "line": 100.0
   },
-  "src/handlers/knxd_status_json.cpp": {
+  "src/handlers/bus_status_json.cpp": {
     "branch": 100.0,
     "line": 100.0
   },
@@ -64,14 +72,6 @@
     "line": 100.0
   },
   "src/handlers/write_handler.h": {
-    "branch": 100.0,
-    "line": 100.0
-  },
-  "src/knxd/cache_reader.cpp": {
-    "branch": 100.0,
-    "line": 100.0
-  },
-  "src/knxd/cache_reader.h": {
     "branch": 100.0,
     "line": 100.0
   },

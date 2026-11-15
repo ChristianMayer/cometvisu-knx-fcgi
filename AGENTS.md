@@ -3,10 +3,10 @@
 This file provides guidelines for AI coding agents working on the
 `cometvisu-knx-fcgi` project.
 
-**Roadmap:** [PLAN-KNXNETIP.md](PLAN-KNXNETIP.md) is the TDD-based
-implementation plan for the transport layer.  Phases P0–P8 are implemented in
-2.0.0; use it as the design record and keep its decisions (§8) when extending
-the code.
+**Roadmap:** [ROADMAP.md](ROADMAP.md) lists the deferred work (the `/f`
+endpoint, KNX IP Secure, hardware interop).  The transport layer (phases P0–P8
+of the former `PLAN-KNXNETIP.md`) shipped in 2.0.0; this file is the design
+record, the git history holds the implementation plan.
 
 **Development container:** `.devcontainer/` provides the full toolchain
 (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb, `libfcgi-dev`,
@@ -175,7 +175,7 @@ actual file content (e.g., `#pragma once` or `#include`).
 | Directory        | Purpose                                      |
 |------------------|----------------------------------------------|
 | `src/`           | Production source code                       |
-| `src/bus/`       | Transport seam: `BusLink`, `BusConfig`, `BusFactory`, shared TX link |
+| `src/bus/`       | Transport seam: `BusLink`, `BusConfig`, `BusFactory`, shared TX link, cache reader loop |
 | `src/knxnetip/`  | cEMI codec, KNXnet/IP framing, routing/tunnelling links, discovery |
 | `src/fcgi/`      | FastCGI protocol implementation              |
 | `src/router/`    | URL routing and handler dispatch             |
@@ -314,7 +314,7 @@ actual file content (e.g., `#pragma once` or `#include`).
    data, and push value data to the shared cache.  Each push increments the
    shared position counter and broadcasts the condition variable to wake
    blocked long-poll readers.
-   The loop lives in `run_cache_reader()` (`src/knxd/cache_reader.{h,cpp}`, unit
+   The loop lives in `run_cache_reader()` (`src/bus/cache_reader.{h,cpp}`, unit
    tested via `MockBusLink`) and is resilient by design: the bus may be absent
    at startup or restart at any time (`Link down, terminating`), so every
    failure path reconnects forever with an exponential backoff (500 ms … 30 s)
@@ -336,7 +336,7 @@ actual file content (e.g., `#pragma once` or `#include`).
    Whenever the connection is down, `/r` and `/w` append
    `"knxd":{"ok":false,"since":<ts>,"lastOk":<ts>}` (key `"bus"` for the
    KNXnet/IP transports) via
-   `add_bus_outage()` (`src/handlers/knxd_status_json.{h,cpp}`); the field is
+   `add_bus_outage()` (`src/handlers/bus_status_json.{h,cpp}`); the field is
    absent while knxd is reachable, so the normal case costs no bytes.  `/r`
    answers **`503`** (a read is not successful while the bus is unreachable) and
    skips the long-poll wait — nothing can arrive, so waiting would only delay

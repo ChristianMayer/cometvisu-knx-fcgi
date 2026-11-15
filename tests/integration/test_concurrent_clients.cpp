@@ -40,7 +40,7 @@
 #include "bus/bus_link.h"
 #include "bus/shared_tx_bus_link.h"
 #include "fcgi/fcgi_server.h"
-#include "knxd/cache_reader.h"
+#include "bus/cache_reader.h"
 #include "router/router.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"

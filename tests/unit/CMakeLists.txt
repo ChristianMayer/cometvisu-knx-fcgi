@@ -96,11 +96,11 @@ add_executable(test_fcgi_server_run
 target_link_libraries(test_fcgi_server_run PRIVATE cvknx_fcgi cvknx_util GTest::gtest GTest::gtest_main)
 add_test(NAME test_fcgi_server_run COMMAND test_fcgi_server_run)
 
-add_executable(test_knxd_connector
-    test_knxd_connector.cpp
+add_executable(test_bus_connector
+    test_bus_connector.cpp
 )
-target_link_libraries(test_knxd_connector PRIVATE cvknx_bus cvknx_mocks GTest::gtest GTest::gtest_main)
-add_test(NAME test_knxd_connector COMMAND test_knxd_connector)
+target_link_libraries(test_bus_connector PRIVATE cvknx_bus cvknx_mocks GTest::gtest GTest::gtest_main)
+add_test(NAME test_bus_connector COMMAND test_bus_connector)
 
 if(KNX_BUILD_KNXD_TRANSPORT)
 add_executable(test_knxd_client_socket

@@ -15,10 +15,10 @@
 
 /**
  * @file cache_reader.cpp
- * @brief Implementation of the resilient knxd -> SharedGroupCache pump.
+ * @brief Implementation of the resilient bus -> SharedGroupCache pump.
  */
 
-#include "knxd/cache_reader.h"
+#include "bus/cache_reader.h"
 
 #include <poll.h>
 #include <time.h>
@@ -30,7 +30,7 @@
 #include <vector>
 
 #include "bus/bus_link.h"
-#include "knxd/knxd_protocol.h"
+#include "bus/knx_codec.h"
 #include "state/shared_group_cache.h"
 #include "state/shared_tx_queue.h"
 #include "util/debug_log.h"

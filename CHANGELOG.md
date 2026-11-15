@@ -118,6 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connect_knxd_with_retry()` became the transport-neutral
   `connect_bus_with_retry()` (`src/bus/bus_connector.*`) and is used for the
   short startup probe.
+- **Documentation consolidated**: `PLAN.md` and `PLAN-KNXNETIP.md` were removed.
+  The architecture and design decisions live in `AGENTS.md`, the client
+  contract and configuration in `README.md`, deferred work in `ROADMAP.md`.
+- Transport-neutral code moved out of `src/knxd/`: the cache reader is now
+  `src/bus/cache_reader.*`, the outage helper `src/handlers/bus_status_json.*`.
+  `src/knxd/` keeps the knxd transport plus the shared KNX address/APDU helpers
+  in `knxd_protocol.*` (their eibd-specific parts are `#ifdef`-guarded).
 - **Development container** (`.devcontainer/`) with the complete toolchain
   (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb), `libfcgi-dev`,
   `knxd`/`knxd-dev` for the knxd transport, and the networking tools needed for

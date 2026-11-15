@@ -30,7 +30,7 @@
 
 #include "knxd/knxd_client.h"
 #include "knxd/knxd_protocol.h"
-#include "knxd_status_json.h"
+#include "bus_status_json.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/hex.h"

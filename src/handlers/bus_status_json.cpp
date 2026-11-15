@@ -14,11 +14,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
- * @file knxd_status_json.cpp
+ * @file bus_status_json.cpp
  * @brief Implementation of the knxd outage block used by /r and /w.
  */
 
-#include "knxd_status_json.h"
+#include "bus_status_json.h"
 
 #include "util/json_builder.h"
 

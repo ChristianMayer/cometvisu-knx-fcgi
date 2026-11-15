@@ -15,13 +15,13 @@
 
 /**
  * @file cache_reader.h
- * @brief The knxd -> SharedGroupCache pump (one dedicated process).
+ * @brief The bus -> SharedGroupCache pump (one dedicated process).
  *
- * The cache reader is the only process that reads group telegrams from knxd.
- * Its loop must be resilient: knxd can be absent at startup, restart at any
- * time ("Link down, terminating"), or disappear for hours.  The loop therefore
- * reconnects forever with an exponential backoff and never spins — a busy loop
- * would burn a full CPU core, which is unacceptable on an embedded system.
+ * The cache reader owns the only bus link (any transport) for RX and TX.
+ * Its loop must be resilient: the bus can be absent at startup or restart at
+ * any time.  The loop therefore reconnects forever with an exponential
+ * backoff and never spins — a busy loop would burn a full CPU core, which is
+ * unacceptable on an embedded system.
  *
  * Extracted from main.cpp so that the reconnect/backoff behaviour is unit
  * testable with MockBusLink.

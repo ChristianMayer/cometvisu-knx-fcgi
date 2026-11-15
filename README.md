@@ -31,8 +31,9 @@ dependency.
 ## Quick Start
 
 ```bash
-# Prerequisites
-sudo apt install libfcgi-dev knxd-dev cmake g++
+# Prerequisites (knxd-dev is only needed for the knxd transport)
+sudo apt install libfcgi-dev cmake g++
+sudo apt install knxd-dev        # only for KNX_TRANSPORT=knxd
 
 # Build (using system-installed knxd headers)
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
@@ -194,7 +195,9 @@ a `... (truncated, NNNN chars total)` marker.
 
 ## Architecture
 
-See [PLAN.md](PLAN.md) for the full architecture and design document.
+See [AGENTS.md](AGENTS.md) for the architecture, the design decisions (worker
+pool, shared cache, transport seam, TX queue) and the coding rules.  Deferred
+work is listed in [ROADMAP.md](ROADMAP.md).
 
 ## License
 

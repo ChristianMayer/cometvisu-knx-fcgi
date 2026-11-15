@@ -60,7 +60,7 @@
 #include "bus/knx_codec.h"
 #include "bus/shared_tx_bus_link.h"
 #include "fcgi/fcgi_server.h"
-#include "knxd/cache_reader.h"
+#include "bus/cache_reader.h"
 #include "knxnetip/discovery.h"
 #include "knxnetip/knxnetip_frame.h"
 #include "router/router.h"

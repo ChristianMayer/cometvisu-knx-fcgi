@@ -37,7 +37,7 @@
 #include "../../src/bus/bus_link.h"
 #include "../../src/bus/shared_tx_bus_link.h"
 #include "../../src/handlers/write_handler.h"
-#include "../../src/knxd/cache_reader.h"
+#include "../../src/bus/cache_reader.h"
 #include "../../src/state/session_store.h"
 #include "../../src/state/shared_group_cache.h"
 #include "../../src/state/shared_tx_queue.h"

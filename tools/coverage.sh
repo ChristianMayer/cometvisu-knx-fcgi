@@ -13,8 +13,9 @@
 #   tools/coverage.sh --strict        # require 100% for every file
 #   tools/coverage.sh --list-uncovered
 #
-# Always removes old .gcda files first: after a rebuild they belong to a
-# different binary and gcov would report bogus zeros.
+# Always removes old .gcda/.gcno files first: after a rename or a deleted source
+# the old notes belong to files that no longer exist, and gcov would report them
+# as dead files (or as bogus zeros).  The rebuild is therefore always clean.
 
 set -euo pipefail
 
@@ -27,7 +28,11 @@ if [ ! -f "$build_dir/CMakeCache.txt" ]; then
     cmake -B "$build_dir" $target_debug -DBUILD_TESTING=ON -DENABLE_COVERAGE=ON
 fi
 
-cmake --build "$build_dir" -j"$(nproc)"
+# Orphaned notes of moved/removed sources would be reported as uncovered files.
+find "$build_dir" -name '*.gcda' -delete
+find "$build_dir" -name '*.gcno' -delete
+
+cmake --build "$build_dir" -j"$(nproc)" --clean-first
 
 find "$build_dir" -name '*.gcda' -delete
 

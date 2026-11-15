@@ -97,9 +97,9 @@ add_library(cvknx_state STATIC
 target_include_directories(cvknx_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cvknx_state PUBLIC cvknx_util)
 
-# ---- Cache reader library (knxd -> SharedGroupCache pump) ----
+# ---- Cache reader library (bus -> SharedGroupCache pump, RX + TX) ----
 add_library(cvknx_cache_reader STATIC
-    knxd/cache_reader.cpp
+    bus/cache_reader.cpp
 )
 
 target_include_directories(cvknx_cache_reader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -127,7 +127,7 @@ add_library(cvknx_handlers STATIC
     handlers/login_handler.cpp
     handlers/read_handler.cpp
     handlers/write_handler.cpp
-    handlers/knxd_status_json.cpp
+    handlers/bus_status_json.cpp
 )
 
 target_include_directories(cvknx_handlers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

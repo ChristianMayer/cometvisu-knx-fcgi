@@ -88,6 +88,45 @@ jobs:
       - name: Run tests (Release)
         run: ctest --test-dir ${{ env.BUILD_DIR }}_release --output-on-failure --timeout 120
 
+  no-knxd:
+    # The KNXnet/IP transports must build and work without any knxd dependency.
+    # This job deliberately does *not* install knxd-dev: with
+    # -DKNX_BUILD_KNXD_TRANSPORT=OFF the build must succeed without
+    # <eibtypes.h>, and the knxd-only test targets are not registered.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (no knxd)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            g++ \
+            libfcgi-dev
+
+      - name: Verify no knxd header is available
+        run: |
+          if find /usr/include -name eibtypes.h | grep -q .; then
+            echo "knxd-dev must not be installed in this job" >&2
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          cmake -B ${{ env.BUILD_DIR }} \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DKNX_BUILD_KNXD_TRANSPORT=OFF
+
+      - name: Build
+        run: cmake --build ${{ env.BUILD_DIR }} -j$(nproc)
+
+      - name: Run tests
+        run: ctest --test-dir ${{ env.BUILD_DIR }} --output-on-failure --timeout 120
+
   coverage:
     # Coverage is measured on every pull request (and on main, so the baseline
     # cannot silently drift).  gcc only: the gate reads gcov counters.

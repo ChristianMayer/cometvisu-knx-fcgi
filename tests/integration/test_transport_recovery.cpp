@@ -51,7 +51,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../src/knxd/cache_reader.h"
+#include "../../src/bus/cache_reader.h"
 #include "../../src/knxnetip/cemi.h"
 #include "../../src/knxnetip/knxnetip_frame.h"
 #include "../../src/knxnetip/tunneling_bus_link.h"
