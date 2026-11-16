@@ -76,7 +76,7 @@ TEST_F(KnxdClientTest, WaitForActivity) {
 TEST_F(KnxdClientTest, Reconnect) {
   ASSERT_TRUE(client_.connect("/run/knx"));
   ASSERT_TRUE(client_.open_group_socket(false));
-  EXPECT_TRUE(client_.reconnect());
+  EXPECT_TRUE(client_.connect());
   EXPECT_TRUE(client_.is_connected());
 }
 
@@ -137,10 +137,6 @@ TEST_F(KnxdClientTest, ResetClearsState) {
   EXPECT_EQ(client_.get_telegram_count(), 0);
 }
 
-TEST_F(KnxdClientTest, ReconnectWithoutInitialConnect) {
-  EXPECT_FALSE(client_.reconnect());  // never connected → fails
-}
-
 TEST_F(KnxdClientTest, SendFailsWhenNotConnected) {
   std::vector<uint8_t> apdu = {0x00, 0x80, 0x42};
   EXPECT_FALSE(client_.send_group_packet(0x0A03, apdu));
@@ -181,7 +177,7 @@ TEST_F(KnxdClientTest, SendGroupPacketFailsWhenGroupSocketNotOpen) {
 TEST_F(KnxdClientTest, OperationsWorkAfterReconnect) {
   ASSERT_TRUE(client_.connect("/run/knx"));
   ASSERT_TRUE(client_.open_group_socket(false));
-  EXPECT_TRUE(client_.reconnect());
+  EXPECT_TRUE(client_.connect());
   // After reconnect, group socket must be re-opened and operations work
   std::vector<uint8_t> apdu = {0x00, 0x80, 0x42};
   EXPECT_TRUE(client_.send_group_packet(0x0A03, apdu));

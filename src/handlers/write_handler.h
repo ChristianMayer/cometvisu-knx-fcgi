@@ -15,18 +15,21 @@
 
 /**
  * @file write_handler.h
- * @brief CometVisu write endpoint handler — sends group telegrams to knxd.
+ * @brief CometVisu write endpoint handler — sends a group telegram to the bus.
  *
  * Equivalent to the reference eibwrite-cgi.c: parses the address and hex
- * value from the query string, builds an APDU, and sends it via the group
- * socket.  Key differences:
+ * value from the query string, builds an APDU, and hands it to the shared TX
+ * ring (the cache reader is the only process that talks to the bus).
+ *
+ * Key differences from eibwrite-cgi:
  *   - Multi-address writes: the `a` parameter can appear multiple times.
- *   - Rate limiting: enforces a minimum 50 ms interval between writes to
- *     prevent flooding knxd's IP tunnel (eibwrite-cgi had no such limit).
- *   - APDU validation: rejects values whose first byte lacks the Write APCI
- *     bit (0x80), matching eibwrite-cgi's check.
- *   - Error reporting: returns HTTP 503 if all valid writes fail, unlike
- *     eibwrite-cgi which silently ignored failures.
+ *   - Strict input validation: a value that is not an A_GroupValue_Write
+ *     answers 400 instead of pretending success.
+ *   - Error reporting: answers 503 when a write could not be handed to the bus
+ *     (with the number of failed addresses), instead of ignoring the failure.
+ *   - Write pacing is applied by the cache reader (`BusLink::min_send_interval_ms()`),
+ *     not by this handler: blocking here would stall the process that also
+ *     receives the telegrams.
  */
 
 #pragma once
@@ -44,7 +47,7 @@ class SharedGroupCache;
  * @brief Result of a write operation (POST /w).
  */
 struct WriteResult {
-  /// HTTP status code (200, 400, 401, 403, 404).
+  /// HTTP status code (200, 400, 401, 404, 503).
   int http_status = 200;
   /// Response body: empty on success, JSON error details on failure.
   std::string body;
@@ -77,7 +80,7 @@ public:
 
   /// @brief Process a write request.
   /// @param query_string Raw QUERY_STRING from FCGI (e.g. "a=1/2/3&v=8042").
-  /// @return WriteResult with HTTP status code (200, 401, 404, 503).
+  /// @return WriteResult with HTTP status code (200, 400, 401, 404, 503).
   [[nodiscard]] WriteResult handle(std::string_view query_string);
 
 private:

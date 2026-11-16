@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -117,7 +118,7 @@ struct Frame {
 /// @return std::nullopt for a wrong header length/version, a length mismatch
 ///         or an unknown service type.
 [[nodiscard]] std::optional<Frame> parse_frame(const std::uint8_t* data, std::size_t size);
-[[nodiscard]] std::optional<Frame> parse_frame(const std::vector<std::uint8_t>& data);
+[[nodiscard]] std::optional<Frame> parse_frame(std::span<const std::uint8_t> data);
 
 // ---- HPAI ----
 
@@ -145,7 +146,7 @@ struct ConnectResponse {
 };
 
 [[nodiscard]] std::optional<ConnectResponse> parse_connect_response(
-    const std::vector<std::uint8_t>& frame);
+    std::span<const std::uint8_t> frame);
 
 /// CONNECTIONSTATE_REQUEST / DISCONNECT_REQUEST share the same body.
 [[nodiscard]] std::vector<std::uint8_t> build_connectionstate_request(std::uint8_t channel,
@@ -160,7 +161,7 @@ struct StatusResponse {
 };
 
 [[nodiscard]] std::optional<StatusResponse> parse_status_response(
-    const std::vector<std::uint8_t>& frame, ServiceType expected);
+    std::span<const std::uint8_t> frame, ServiceType expected);
 
 // ---- Tunnelling data ----
 
@@ -173,7 +174,7 @@ struct TunnellingRequest {
 [[nodiscard]] std::vector<std::uint8_t> build_tunnelling_request(
     std::uint8_t channel, std::uint8_t sequence, const std::vector<std::uint8_t>& cemi);
 [[nodiscard]] std::optional<TunnellingRequest> parse_tunnelling_request(
-    const std::vector<std::uint8_t>& frame);
+    std::span<const std::uint8_t> frame);
 
 struct TunnellingAck {
   std::uint8_t channel = 0;
@@ -187,7 +188,7 @@ struct TunnellingAck {
                                                              std::uint8_t sequence,
                                                              std::uint8_t status = 0);
 [[nodiscard]] std::optional<TunnellingAck> parse_tunnelling_ack(
-    const std::vector<std::uint8_t>& frame);
+    std::span<const std::uint8_t> frame);
 
 // ---- Routing ----
 
@@ -195,7 +196,13 @@ struct TunnellingAck {
 [[nodiscard]] std::vector<std::uint8_t> build_routing_indication(
     const std::vector<std::uint8_t>& cemi);
 [[nodiscard]] std::optional<std::vector<std::uint8_t>> parse_routing_indication(
-    const std::vector<std::uint8_t>& frame);
+    std::span<const std::uint8_t> frame);
+
+/// Zero-copy variant of parse_routing_indication(): validates the frame header
+/// and returns a view of the cEMI payload inside @p frame.  The view is valid
+/// only as long as @p frame is (the caller owns the receive buffer).
+[[nodiscard]] std::optional<std::span<const std::uint8_t>> parse_routing_payload(
+    std::span<const std::uint8_t> frame);
 
 // ---- Discovery ----
 
@@ -212,6 +219,6 @@ struct SearchResponse {
 };
 
 [[nodiscard]] std::optional<SearchResponse> parse_search_response(
-    const std::vector<std::uint8_t>& frame);
+    std::span<const std::uint8_t> frame);
 
 }  // namespace cvknx::knxnetip

@@ -242,7 +242,15 @@ std::string FcgiGet(const std::string& socket_path, const std::string& endpoint)
   };
 
   std::string request = record(0x01, std::string("\x00\x01\x00\x00\x00\x00\x00\x00", 8));
-  request += record(0x04, param("REQUEST_METHOD", "GET") + param("REQUEST_URI", endpoint));
+  // Split "path?query" the way a web server would: PATH_INFO and QUERY_STRING
+  // are separate FastCGI parameters, and without QUERY_STRING the handlers see
+  // no parameters at all.
+  const auto question = endpoint.find('?');
+  const std::string path = endpoint.substr(0, question);
+  const std::string query =
+      question == std::string::npos ? std::string{} : endpoint.substr(question + 1);
+  request += record(0x04, param("REQUEST_METHOD", "GET") + param("REQUEST_URI", endpoint) +
+                              param("PATH_INFO", path) + param("QUERY_STRING", query));
   request += record(0x04, "");
   request += record(0x05, "");
 
@@ -697,6 +705,24 @@ TEST(MainE2ETest, NumericSettingsBelowTheMinimumUseTheDefault) {
   ::unlink(path.c_str());
 }
 
+/// A value that is not a number, has trailing garbage or overflows must fall
+/// back to the default instead of being truncated into a plausible one.
+TEST(MainE2ETest, MalformedNumericSettingsUseTheDefault) {
+  for (const char* value : {"abc", "2x", "99999999999999999999"}) {
+    const std::string path = TempSocketPath("garbage");
+    Env env = RoutingEnv();
+    env.emplace_back("FCGI_SOCKET", path);
+    env.emplace_back("FCGI_WORKERS", value);
+
+    BackendProcess process({}, env);
+    ASSERT_TRUE(process.wait_for_output("All 20 workers started, supervising children...", 15000))
+        << "FCGI_WORKERS=" << value << ":\n"
+        << process.output();
+    EXPECT_EQ(process.terminate(), 0);
+    ::unlink(path.c_str());
+  }
+}
+
 TEST(MainE2ETest, EmptyNumericSettingUsesTheDefault) {
   const std::string path = TempSocketPath("empty");
   Env env = RoutingEnv();
@@ -716,6 +742,92 @@ TEST(MainE2ETest, DiscoveryWithoutAnyOverrideUsesTheCompiledDefault) {
   const int code = process.wait_exit(30000);
   EXPECT_EQ(code, 1);
   EXPECT_NE(process.output().find("224.0.23.12:3671"), std::string::npos) << process.output();
+}
+
+// ================================================================
+// Sessions across the worker pool
+// ================================================================
+
+namespace {
+
+/// Log in through the pool and return the session id.
+std::string LoginSession(const std::string& socket_path) {
+  const std::string response = FcgiGet(socket_path, "/l?u=user&p=pass");
+  const auto start = response.find("\"s\":\"");
+  if (start == std::string::npos) {
+    return {};
+  }
+  const auto value_start = start + 5;
+  const auto value_end = response.find('"', value_start);
+  if (value_end == std::string::npos) {
+    return {};
+  }
+  return response.substr(value_start, value_end - value_start);
+}
+
+}  // namespace
+
+/// Every client must be able to log in and then be recognised by *any* worker.
+///
+/// Regression test: the session store used to be an ordinary member copied by
+/// fork(), so a session created by one worker answered 401 in every other one
+/// (verified: with four workers every follow-up request failed).
+TEST(MainE2ETest, SessionIsValidInEveryWorker) {
+  const std::string path = TempSocketPath("session");
+  Env env = RoutingEnv();
+  env.emplace_back("FCGI_SOCKET", path);
+  env.emplace_back("FCGI_WORKERS", "4");
+
+  BackendProcess process({}, env);
+  ASSERT_TRUE(process.wait_for_output("All 4 workers started, supervising children..."))
+      << process.output();
+  ASSERT_TRUE(process.wait_for_output("Shared session store created")) << process.output();
+
+  const std::string session = LoginSession(path);
+  ASSERT_FALSE(session.empty()) << process.output();
+
+  // Ten sequential requests are spread over the pool; none may answer 401.
+  for (int i = 0; i < 10; ++i) {
+    const std::string response = FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + session);
+    EXPECT_EQ(response.find("Status: 401"), std::string::npos)
+        << "request " << i << " hit a worker that does not know the session:\n"
+        << response;
+  }
+
+  EXPECT_EQ(process.terminate(), 0);
+  ::unlink(path.c_str());
+}
+
+/// More logins than the store can hold must not lock anybody out: the oldest
+/// session is evicted, the newest keeps working.
+TEST(MainE2ETest, OldestSessionIsEvictedWhenTheStoreIsFull) {
+  const std::string path = TempSocketPath("session-full");
+  Env env = RoutingEnv();
+  env.emplace_back("FCGI_SOCKET", path);
+  env.emplace_back("FCGI_WORKERS", "2");
+  env.emplace_back("SESSION_MAX", "2");
+
+  BackendProcess process({}, env);
+  ASSERT_TRUE(process.wait_for_output("All 2 workers started, supervising children..."))
+      << process.output();
+  ASSERT_TRUE(process.wait_for_output("capacity=2")) << process.output();
+
+  const std::string first = LoginSession(path);
+  const std::string second = LoginSession(path);
+  ASSERT_FALSE(first.empty());
+  ASSERT_FALSE(second.empty());
+
+  // The store holds two sessions; a third login evicts the first one.
+  const std::string third = LoginSession(path);
+  ASSERT_FALSE(third.empty());
+
+  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + third).find("Status: 200"), std::string::npos);
+  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + second).find("Status: 200"), std::string::npos);
+  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + first).find("Status: 401"), std::string::npos)
+      << "the oldest session should have been evicted";
+
+  EXPECT_EQ(process.terminate(), 0);
+  ::unlink(path.c_str());
 }
 
 }  // namespace

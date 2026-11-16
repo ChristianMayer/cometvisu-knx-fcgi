@@ -216,7 +216,8 @@ TEST(TunnelingBusLinkTest, SendIncrementsSequenceAndWaitsForAck) {
   EXPECT_EQ(parsed->channel, kChannel);
   EXPECT_EQ(parsed->sequence, 0);
   // L_Data.req carrying the CRD address as source and the group as destination.
-  const auto expected_cemi = cemi::encode_group_request(0x1101, 0x0A03, {0x00, 0x80, 0x42});
+  const auto expected_cemi =
+      cemi::encode_group_request(0x1101, 0x0A03, cemi::Bytes{0x00, 0x80, 0x42});
   EXPECT_EQ(parsed->cemi, expected_cemi);
 
   router.reply(knxnetip::build_tunnelling_ack(kChannel, 0));

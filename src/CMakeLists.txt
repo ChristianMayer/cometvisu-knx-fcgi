@@ -86,10 +86,9 @@ add_library(cvknx_transport STATIC
 target_include_directories(cvknx_transport PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cvknx_transport PUBLIC cvknx_bus cvknx_knxd cvknx_state)
 
-# ---- State library (sessions + local group cache + shared group cache) ----
+# ---- State library (sessions + shared group cache + shared TX ring) ----
 add_library(cvknx_state STATIC
     state/session_store.cpp
-    state/group_cache.cpp
     state/shared_group_cache.cpp
     state/shared_tx_queue.cpp
 )

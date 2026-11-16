@@ -308,9 +308,10 @@ TEST_F(IpTunnelBlackBox, WriteSourceAddressIsTheDeviceAssignedAddress) {
       << backend_->log();
 }
 
-TEST_F(IpTunnelBlackBox, InvalidValuePublishesNothing) {
+TEST_F(IpTunnelBlackBox, InvalidValueIsRejectedAndPublishesNothing) {
   const auto response = write(*backend_, group_text(10), "zz");
-  EXPECT_EQ(response.status, 200);
+  // An unusable value is a client error, not a silent success.
+  EXPECT_EQ(response.status, 400);
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   EXPECT_TRUE(knxd_->groupcache_read(group_text(10)).empty());
 }

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -42,8 +43,6 @@ class SharedTxQueue;
 /// Tunables for run_cache_reader().  Defaults are production values; tests
 /// use very small values to keep the runtime short.
 struct CacheReaderOptions {
-  /// Path of the knxd Unix socket.
-  std::string socket_path = "/run/knx";
   /// poll() slice while connected.  Also the maximum latency of the stop check.
   int wait_timeout_ms = 1000;
   /// First reconnect delay after a failure.
@@ -63,7 +62,10 @@ struct CacheReaderOptions {
 /// Guarantees:
 ///   - never busy-loops, even when the bus link is missing or dies;
 ///   - retries the connection forever with exponential backoff;
-///   - resumes pushing telegrams as soon as the link is usable again.
+///   - resumes pushing telegrams as soon as the link is usable again;
+///   - paces outgoing telegrams by `BusLink::min_send_interval_ms()` without
+///     blocking reception: the pacing delay is a poll() timeout, so an inbound
+///     telegram is still delivered immediately.
 ///
 /// @param link Bus link to use (must not be connected yet; the loop owns it).
 /// @param cache Shared cache that receives the telegrams.
@@ -81,6 +83,34 @@ namespace detail {
 /// What woke the cache reader loop.
 enum class Activity : std::uint8_t { Timeout, Data, Tx, Error };
 
+/// Outcome of one TX drain batch.
+struct TxDrain {
+  int sent = 0;
+  /// A send failed: the link is in trouble.  The caller must not spin — the
+  /// telegram stays queued and is retried after a normal wait.
+  bool failed = false;
+  /// The transport's minimum send interval has not elapsed yet.  The caller
+  /// must not send before this many milliseconds have passed; it should use
+  /// the value as its poll() timeout so reception keeps running meanwhile.
+  int wait_ms = 0;
+};
+
+/// Send waiting telegrams into the bus, honouring
+/// `BusLink::min_send_interval_ms()`.
+///
+/// The pacing is expressed as a *wait* (`TxDrain::wait_ms`), never as a sleep
+/// inside the link: an inbound telegram must still be delivered immediately
+/// (AGENTS.md rule 2).
+///
+/// @param should_stop Checked between telegrams, so shutdown stays prompt.
+///        An empty predicate means "never stop".
+/// @param max_batch Upper bound of telegrams per call.
+/// @param next_send_at Earliest time the next telegram may go out (loop state,
+///        updated here).
+[[nodiscard]] TxDrain drain_tx_queue(BusLink& link, SharedTxQueue& queue,
+                                     const std::function<bool()>& should_stop, int max_batch,
+                                     std::chrono::steady_clock::time_point& next_send_at);
+
 /// Sleep for @p duration_ms, but wake up early when should_stop() becomes true.
 /// Sleeps in slices so a shutdown never waits for a full backoff period.
 /// An empty should_stop means "never stop early".
@@ -90,13 +120,8 @@ void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool
 /// stop", which keeps the loop running until the process is killed.
 [[nodiscard]] bool stop_requested(const std::function<bool()>& should_stop);
 
-/// Send every telegram waiting in the shared TX ring.
-/// Clears the eventfd first, so a push during draining re-arms it.
-/// @return number of telegrams handed to the bus without error.
-int drain_tx_queue(BusLink& link, SharedTxQueue& queue);
-
 /// Wait for bus traffic, an outgoing telegram, or the timeout — one poll().
-/// Never busy-loops: the eventfd is consumed by drain_tx_queue().
+/// Never busy-loops: the eventfd is consumed before waiting.
 /// @param tx_queue Optional shared TX ring; when null (or without an eventfd)
 ///        only the bus link is polled.
 Activity wait_for_activity(BusLink& link, SharedTxQueue* tx_queue, int timeout_ms);

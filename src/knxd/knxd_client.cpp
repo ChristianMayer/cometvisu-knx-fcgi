@@ -37,7 +37,6 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
-#include <thread>
 
 #include "../util/debug_log.h"
 #include "../util/hex.h"
@@ -59,14 +58,13 @@ struct KnxdClient::Impl {
   Impl(Impl&&) = delete;
   Impl& operator=(Impl&&) = delete;
 
-  int fd = -1;                                              // Unix socket to knxd
-  bool group_socket_open = false;                           // OPEN_GROUPCON succeeded
-  int handshake_timeout_ms = 5000;                          // OPEN_GROUPCON reply deadline
-  std::string socket_path_;                                 // stored for reconnect
-  bool write_only_ = false;                                 // stored for reconnect
-  std::vector<uint8_t> read_buffer_;                        // buffered partial reads (non-blocking)
-  uint64_t telegram_count_ = 0;                             // total APDU_PACKET received
-  std::chrono::steady_clock::time_point last_group_write_;  // rate limiting
+  int fd = -1;                        // Unix socket to knxd
+  bool group_socket_open = false;     // OPEN_GROUPCON succeeded
+  int handshake_timeout_ms = 5000;    // OPEN_GROUPCON reply deadline
+  std::string socket_path_;           // stored for reconnect
+  bool write_only_ = false;           // stored for reconnect
+  std::vector<uint8_t> read_buffer_;  // buffered partial reads (non-blocking)
+  uint64_t telegram_count_ = 0;       // total APDU_PACKET received
 
   mutable std::recursive_mutex mutex;  // serializes socket access
 };
@@ -266,8 +264,9 @@ bool KnxdClient::connect(std::string_view socket_path) {
   }
   std::memcpy(addr.sun_path, socket_path.data(), socket_path.size());
 
-  // Remember the path even when this attempt fails: reconnect() needs it to
-  // recover once knxd is back (e.g. "Link down, terminating" at startup).
+  // Remember the path even when this attempt fails: a later connect() (the
+  // cache reader is the single reconnect authority) needs it to recover once
+  // knxd is back (e.g. "Link down, terminating" at startup).
   impl_->socket_path_ = socket_path;
 
   // Non-blocking connect with 5-second timeout.
@@ -329,28 +328,6 @@ bool KnxdClient::is_connected() const {
   return impl_->fd >= 0;
 }
 
-bool KnxdClient::reconnect() {
-  std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-  if (impl_->socket_path_.empty()) {
-    return false;
-  }
-  if (impl_->fd >= 0) {
-    ::close(impl_->fd);
-    impl_->fd = -1;
-  }
-  impl_->group_socket_open = false;
-  impl_->read_buffer_.clear();
-  if (!connect(impl_->socket_path_)) {
-    return false;
-  }
-  if (!open_group_socket(impl_->write_only_)) {
-    disconnect();
-    return false;
-  }
-  set_nonblocking(true);
-  return true;
-}
-
 bool KnxdClient::connect() {
   if (impl_->socket_path_.empty()) {
     return false;
@@ -409,73 +386,50 @@ bool KnxdClient::open_group_socket(bool write_only) {
 bool KnxdClient::send_group_packet(uint16_t group_addr, const std::vector<uint8_t>& apdu) {
   std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
 
-  // Rate limiting: 50 ms minimum between writes prevents flooding knxd's
-  // IP tunnel, which would cause retry exhaustion and "Link down".
-  constexpr auto kMinWriteInterval = std::chrono::milliseconds(50);
-  if (impl_->last_group_write_.time_since_epoch().count() > 0) {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - impl_->last_group_write_;
-    if (elapsed < kMinWriteInterval) {
-      std::this_thread::sleep_for(kMinWriteInterval - elapsed);
-    }
-  }
-
+  // No rate limiting and no reconnect here: both belong to the cache reader
+  // loop.  Sleeping in this function would stall the *receive* path (the same
+  // thread that pumps inbound telegrams), and a reconnect with its handshake
+  // deadline would block it for seconds.  The reader paces sends via
+  // min_send_interval_ms() and reconnects when is_connected() turns false.
   if (!is_connected() || !impl_->group_socket_open) {
-    if (!reconnect()) {
-      return false;
-    }
+    return false;
   }
 
   auto addr_str = KnxGroupAddress::from_eibaddr(group_addr).to_string();
   DebugLog::knxd_send("group_packet", addr_str, "apdu=" + hex_encode(apdu.data(), apdu.size()));
 
-  auto msg = build_group_packet(group_addr, apdu);
+  const auto msg = build_group_packet(group_addr, apdu);
   if (!write_all(impl_->fd, msg.data(), msg.size())) {
-    // Write failed (e.g. EPIPE after knxd restart on a still-valid fd).
-    // Reconnect and retry once.
-    if (!reconnect()) {
-      impl_->last_group_write_ = std::chrono::steady_clock::now();
-      return false;
-    }
-    msg = build_group_packet(group_addr, apdu);
-    // GCOV_EXCL_START - the retry runs on a freshly connected socket; making it
-    // fail would require the peer to abort between the two writes.
-    if (!write_all(impl_->fd, msg.data(), msg.size())) {
-      impl_->last_group_write_ = std::chrono::steady_clock::now();
-      return false;
-    }
-    // GCOV_EXCL_STOP
+    // Write failed (e.g. EPIPE after knxd restarted on a still-valid fd).
+    // Drop the socket so the reader notices and reconnects; the telegram is
+    // still in the shared ring and is sent again afterwards.
+    disconnect();
+    return false;
   }
-
-  impl_->last_group_write_ = std::chrono::steady_clock::now();
   return true;
 }
 
 bool KnxdClient::poll_group_telegram(uint16_t& out_group_addr, std::vector<uint8_t>& out_apdu) {
   std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
 
-  if (!is_connected()) {
-    if (!reconnect()) {
-      return false;
-    }
+  if (!is_connected() || !impl_->group_socket_open) {
+    return false;
   }
 
   auto msg = read_message(impl_->fd, impl_->read_buffer_);
   if (!msg) {
-    // Check if the connection died (POLLHUP) — reconnect and retry once.
+    // A dead socket must become visible through is_connected(), so the reader
+    // reconnects.  Reconnecting here (with its handshake deadline) would block
+    // the receive path.
     struct pollfd pfd {};
     pfd.fd = impl_->fd;
     // NOLINTNEXTLINE(readability-implicit-bool-conversion)
     // A dead socket reports POLLHUP; POLLERR without POLLHUP cannot occur for a
     // stream socket whose peer went away, so only the HUP half is reachable.
     if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0) {  // GCOV_EXCL_BR_LINE
-      if (reconnect()) {
-        msg = read_message(impl_->fd, impl_->read_buffer_);
-      }
+      disconnect();
     }
-    if (!msg) {
-      return false;
-    }
+    return false;
   }
 
   uint16_t msg_type = 0;

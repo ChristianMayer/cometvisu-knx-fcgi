@@ -411,4 +411,148 @@ TEST(CacheReaderTest, RetryWarningsAreRateLimited) {
   EXPECT_GE(link.connect_calls(), 2);
   EXPECT_FALSE(cache.bus_status().available);
 }
+/// Without a TX queue the reader polls the link itself and must map every
+/// WaitResult correctly.
+TEST(CacheReaderTest, WithoutATxQueueTheLinkResultIsMapped) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect());
+
+  // Nothing to read: a plain timeout, not an error.
+  EXPECT_EQ(detail::wait_for_activity(link, nullptr, 5), detail::Activity::Timeout);
+
+  // A queue that was attached (no inherited eventfd) takes the same path.
+  MockBusLink link2;
+  ASSERT_TRUE(link2.connect());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  SharedTxQueue attached_to_the_region;
+  attached_to_the_region.attach(queue.data());
+  EXPECT_LT(attached_to_the_region.eventfd(), 0);
+  EXPECT_EQ(detail::wait_for_activity(link2, &attached_to_the_region, 5),
+            detail::Activity::Timeout);
+}
+
+/// A send that kills the link (as the real transports do) must be noticed by
+/// the loop *before* it blocks again, otherwise the reconnect never happens.
+TEST(CacheReaderTest, ADeadLinkAfterAFailedSendTriggersAReconnect) {
+  MockBusLink link;
+  link.set_disconnect_on_send_failure(true);
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  ASSERT_TRUE(queue.push(0x0A03, {0x00, 0x80, 0x01}));
+  link.set_send_fail_count(1);
+
+  CacheReaderOptions options = FastOptions();
+  const auto start = Clock::now();
+  run_cache_reader(link, cache, &queue, options,
+                   [&link, start] { return link.connect_calls() >= 2 || ElapsedMs(start) > 500; });
+
+  EXPECT_GE(link.connect_calls(), 2) << "the loop did not reconnect after the failed send";
+}
+
+// ===========================================================================
+// TX pacing: the transport's minimum send interval is a *wait*, not a sleep
+// ===========================================================================
+
+TEST(CacheReaderPacing, PacesSendsAndReportsTheRemainingDelay) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect());
+  link.set_min_send_interval_ms(50);
+
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  ASSERT_TRUE(queue.push(0x0A01, {0x00, 0x80, 0x01}));
+  ASSERT_TRUE(queue.push(0x0A02, {0x00, 0x80, 0x02}));
+
+  auto next_send_at = Clock::time_point{};
+  const auto first = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  EXPECT_EQ(first.sent, 1) << "one telegram per interval";
+  EXPECT_FALSE(first.failed);
+  EXPECT_EQ(queue.size(), 1U) << "the paced telegram must stay queued";
+
+  // Immediately afterwards the interval has not elapsed: nothing is sent and
+  // the caller is told how long to wait (it must not spin).
+  const auto second = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  EXPECT_EQ(second.sent, 0);
+  EXPECT_GT(second.wait_ms, 0);
+  EXPECT_EQ(link.sent_packets().size(), 1U);
+
+  // After the interval the next telegram goes out.
+  std::this_thread::sleep_for(std::chrono::milliseconds(55));
+  const auto third = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  EXPECT_EQ(third.sent, 1);
+  EXPECT_EQ(queue.size(), 0U);
+  EXPECT_EQ(link.sent_packets().size(), 2U);
+}
+
+TEST(CacheReaderPacing, UnpacedTransportSendsTheWholeBatchAtOnce) {
+  MockBusLink link;  // interval 0
+  ASSERT_TRUE(link.connect());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  for (std::uint16_t i = 0; i < 5; ++i) {
+    ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A10 + i), {0x00, 0x80, 0x01}));
+  }
+  auto next_send_at = Clock::time_point{};
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  EXPECT_EQ(drained.sent, 5);
+  EXPECT_EQ(drained.wait_ms, 0);
+  EXPECT_EQ(queue.size(), 0U);
+}
+
+TEST(CacheReaderPacing, BatchSizeBoundsOneDrainCall) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  for (std::uint16_t i = 0; i < 5; ++i) {
+    ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A20 + i), {0x00, 0x80, 0x01}));
+  }
+  auto next_send_at = Clock::time_point{};
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 2, next_send_at);
+  EXPECT_EQ(drained.sent, 2);
+  EXPECT_EQ(queue.size(), 3U);
+}
+
+TEST(CacheReaderPacing, FailedSendLeavesTheTelegramQueued) {
+  MockBusLink link;
+  ASSERT_TRUE(link.connect());
+  link.set_send_fail_count(1);
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  ASSERT_TRUE(queue.push(0x0A03, {0x00, 0x80, 0x01}));
+
+  auto next_send_at = Clock::time_point{};
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  EXPECT_EQ(drained.sent, 0);
+  EXPECT_TRUE(drained.failed);
+  EXPECT_EQ(queue.size(), 1U) << "a telegram that could not be sent must stay queued";
+}
+
+/// The loop must service reception while it waits for the pacing interval: a
+/// paced backlog may not turn into a busy loop either.
+TEST(CacheReaderPacing, PacedBacklogDoesNotBusyLoop) {
+  MockBusLink link;
+  link.set_min_send_interval_ms(20);
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  for (std::uint16_t i = 0; i < 4; ++i) {
+    ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A30 + i), {0x00, 0x80, 0x01}));
+  }
+
+  CacheReaderOptions options = FastOptions();
+  options.wait_timeout_ms = 100;  // millisecond resolution is enough here
+  const auto start = Clock::now();
+  run_cache_reader(link, cache, &queue, options, [start] { return ElapsedMs(start) > 150; });
+
+  EXPECT_EQ(link.sent_packets().size(), 4U) << "the backlog must be drained";
+  EXPECT_EQ(queue.size(), 0U);
+  // 150 ms / 20 ms pacing = ~7 loop iterations; a spin would produce hundreds.
+  EXPECT_LT(link.wait_calls(), 100) << "the loop spun instead of waiting";
+}
+
 }  // namespace cvknx

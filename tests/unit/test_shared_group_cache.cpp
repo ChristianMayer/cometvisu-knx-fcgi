@@ -298,22 +298,16 @@ TEST_F(SharedGroupCacheTest, WaitForNewDataTimeout) {
   EXPECT_FALSE(got_data) << "Should time out when no new data arrives";
 }
 
-TEST_F(SharedGroupCacheTest, WaitForNewDataSeesPreexistingData) {
-  // Initially, no data has been pushed — wait_for_new_data(0) returns false.
-  bool got_data = cache_.wait_for_new_data(0);
-  EXPECT_FALSE(got_data) << "No data in cache yet";
+TEST_F(SharedGroupCacheTest, WaitForNewDataWithZeroTimeoutNeverBlocks) {
+  // A zero-length wait can never observe new data: the contract is
+  // "do not block, report no new data".
+  EXPECT_FALSE(cache_.wait_for_new_data(0));
 
-  // Push data — generation advances to 1.
   cache_.push(0x0A03, {0x01});
 
-  // wait_for_new_data(0) now returns true because generation > 0.
-  got_data = cache_.wait_for_new_data(0);
-  EXPECT_TRUE(got_data) << "Should detect data was pushed";
-
-  // After consuming (calling wait_for_new_data again), still returns true
-  // because generation is still > 0.
-  got_data = cache_.wait_for_new_data(0);
-  EXPECT_TRUE(got_data) << "Generation stays > 0 after consumption";
+  // Still false — the data is not *new* to a zero-length wait.
+  EXPECT_FALSE(cache_.wait_for_new_data(0));
+  EXPECT_FALSE(cache_.wait_for_new_data(-1));
 }
 
 // ================================================================
@@ -578,19 +572,90 @@ TEST(SharedCacheLifecycle, AttachedInstanceDoesNotUnmapTheRegion) {
   EXPECT_EQ((*value)[0], 0x42);
 }
 
-TEST_F(SharedGroupCacheTest, FullTableDropsFurtherAddresses) {
-  // Fill every slot with a distinct address.
-  for (size_t i = 0; i < kSharedCacheCapacity; ++i) {
-    cache_.push(static_cast<uint16_t>(0x1000 + i), {0x01});
+class SmallCacheTest : public ::testing::Test {
+public:
+  void SetUp() override { ASSERT_TRUE(cache_.create(4)); }
+
+  SharedGroupCache cache_;
+};
+
+/// The cache keeps the most recently pushed `capacity` addresses: pushing one
+/// more address evicts the one that was pushed longest ago.
+TEST_F(SmallCacheTest, EvictsTheLeastRecentlyPushedAddress) {
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A02, {0x02});
+  cache_.push(0x0A03, {0x03});
+  cache_.push(0x0A04, {0x04});
+  EXPECT_EQ(cache_.size(), 4U);
+  EXPECT_EQ(cache_.evictions(), 0U);
+
+  // The fifth address displaces 0x0A01, the oldest one.
+  cache_.push(0x0A05, {0x05});
+  EXPECT_EQ(cache_.size(), 4U);
+  EXPECT_EQ(cache_.evictions(), 1U);
+  EXPECT_FALSE(cache_.get(0x0A01).has_value());
+  EXPECT_TRUE(cache_.get(0x0A02).has_value());
+  EXPECT_TRUE(cache_.get(0x0A05).has_value());
+}
+
+/// A repeated push is a *use*: the address moves to the front, so it survives
+/// the next eviction.
+TEST_F(SmallCacheTest, RepushingRefreshesRecency) {
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A02, {0x02});
+  cache_.push(0x0A03, {0x03});
+  cache_.push(0x0A04, {0x04});
+  cache_.push(0x0A01, {0x11});  // 0x0A01 is now the most recent
+
+  cache_.push(0x0A05, {0x05});  // evicts 0x0A02 instead of 0x0A01
+  EXPECT_TRUE(cache_.get(0x0A01).has_value());
+  EXPECT_FALSE(cache_.get(0x0A02).has_value());
+}
+
+/// Eviction reuses the victim's slot, so the table keeps exactly `capacity`
+/// entries and every remaining address stays readable.
+TEST_F(SmallCacheTest, EvictionKeepsTheTableConsistent) {
+  for (std::uint16_t i = 0; i < 20; ++i) {
+    cache_.push(static_cast<uint16_t>(0x1000 + i), {static_cast<std::uint8_t>(i)});
   }
-  // The table is full: a new address cannot be stored ...
-  cache_.push(0x2000, {0x02});
-  EXPECT_FALSE(cache_.get(0x2000).has_value());
-  // ... while every stored address is still readable.
-  EXPECT_TRUE(cache_.get(0x1000).has_value());
-  // A delta query for the dropped address finds no slot either.
-  const auto delta = cache_.get_delta(0, {0x2000});
-  EXPECT_TRUE(delta.values.empty());
+  EXPECT_EQ(cache_.size(), 4U);
+  EXPECT_EQ(cache_.evictions(), 16U);
+  EXPECT_EQ(cache_.capacity(), 4U);
+  for (std::uint16_t i = 16; i < 20; ++i) {
+    const auto value = cache_.get(static_cast<uint16_t>(0x1000 + i));
+    ASSERT_TRUE(value.has_value()) << "address " << i << " was evicted too early";
+    EXPECT_EQ((*value)[0], static_cast<std::uint8_t>(i));
+  }
+  // A delta query for an evicted address finds nothing either.
+  EXPECT_TRUE(cache_.get_delta(0, {0x1000}).values.empty());
+}
+
+/// Group address 0 is a real address, not the "empty slot" marker.
+TEST_F(SmallCacheTest, StoresGroupAddressZero) {
+  cache_.push(0x0000, {0x42});
+  const auto value = cache_.get(0x0000);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ((*value)[0], 0x42);
+  EXPECT_EQ(cache_.size(), 1U);
+}
+
+TEST(SharedCacheCapacity, DefaultCapacityIsLarge) {
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  EXPECT_EQ(cache.capacity(), kDefaultCacheCapacity);
+  EXPECT_GE(kDefaultCacheCapacity, 16384U);
+}
+
+TEST(SharedCacheCapacity, CapacityIsClampedToTheSupportedRange) {
+  SharedGroupCache tiny;
+  ASSERT_TRUE(tiny.create(1));  // below the minimum
+  EXPECT_EQ(tiny.capacity(), kMinCacheCapacity);
+
+  SharedGroupCache none;  // uninitialised reports no capacity
+  EXPECT_EQ(none.capacity(), 0U);
+  EXPECT_EQ(none.size(), 0U);
+  EXPECT_EQ(none.evictions(), 0U);
+  EXPECT_EQ(none.region_size(64), shared_cache_region_size(64));
 }
 
 TEST_F(SharedGroupCacheTest, DeltaSkipsEntriesAheadOfTheCurrentPosition) {
@@ -627,4 +692,29 @@ TEST_F(SharedGroupCacheTest, OwnerDeathIsRecoveredByEveryAccessor) {
 
   kill_owner();
   (void)cache_.wait_for_new_data(0);
+}
+
+/// A push with no payload stores an empty value (the value length declares it);
+/// the writer must not be handed a null pointer.
+TEST_F(SmallCacheTest, StoresAnEmptyValue) {
+  cache_.push(0x0A03, {});
+  const auto value = cache_.get(0x0A03);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_TRUE(value->empty());
+}
+
+/// Eviction must also work when the victim is not the head of its hash chain:
+/// two addresses that share a bucket make the second the chain head while the
+/// lru victim is the first.
+TEST_F(SmallCacheTest, EvictsAnEntryInsideAHashChain) {
+  // 0x0A01 and 0x0A05 share the bucket (capacity 4: addr % 4 == 1).
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A05, {0x05});
+  cache_.push(0x0A02, {0x02});
+  cache_.push(0x0A03, {0x03});
+
+  cache_.push(0x0A04, {0x04});  // evicts 0x0A01, which sits behind 0x0A05
+  EXPECT_FALSE(cache_.get(0x0A01).has_value());
+  EXPECT_TRUE(cache_.get(0x0A05).has_value());
+  EXPECT_TRUE(cache_.get(0x0A04).has_value());
 }

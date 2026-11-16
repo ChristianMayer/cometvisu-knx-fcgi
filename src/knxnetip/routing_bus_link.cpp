@@ -139,6 +139,7 @@ bool RoutingBusLink::connect() {
   }
 
   const std::uint32_t host_address = *address;
+  destination_ = host_address;
   if (IN_MULTICAST(host_address)) {
     struct ip_mreqn membership {};
     membership.imr_multiaddr.s_addr = htonl(host_address);
@@ -157,6 +158,12 @@ bool RoutingBusLink::connect() {
     }
     // GCOV_EXCL_STOP
   }
+
+  // Ask the kernel for the destination address of every datagram (IP_PKTINFO):
+  // that is the only way to tell a KNX routing indication addressed to our
+  // group from a unicast datagram sprayed at our port by an unrelated host.
+  int pktinfo = 1;
+  (void)::setsockopt(fd_, IPPROTO_IP, IP_PKTINFO, &pktinfo, sizeof(pktinfo));
 
   // Select the outgoing interface by its address.  An ip_mreqn that carries
   // only an interface index leaves the source address to the routing table,
@@ -187,16 +194,13 @@ void RoutingBusLink::disconnect() {
     fd_ = -1;
   }
   local_port_ = 0;
+  destination_ = 0;
 }
 
 bool RoutingBusLink::send_group_packet(std::uint16_t group_addr,
                                        const std::vector<std::uint8_t>& apdu) {
   if (fd_ < 0) {
     return false;
-  }
-  const auto address = knxnetip::ipv4_from_string(options_.address);
-  if (!address) {  // GCOV_EXCL_BR_LINE - connect() validated the address
-    return false;  // GCOV_EXCL_LINE
   }
 
   const auto cemi = cemi::encode_group_indication(options_.source_address, group_addr, apdu);
@@ -207,7 +211,7 @@ bool RoutingBusLink::send_group_packet(std::uint16_t group_addr,
 
   struct sockaddr_in destination {};
   destination.sin_family = AF_INET;
-  destination.sin_addr.s_addr = htonl(*address);
+  destination.sin_addr.s_addr = htonl(destination_);
   destination.sin_port = htons(options_.port);
 
   const ssize_t sent =
@@ -222,6 +226,21 @@ bool RoutingBusLink::send_group_packet(std::uint16_t group_addr,
   return true;
 }
 
+std::optional<std::uint32_t> RoutingBusLink::destination_of(struct msghdr& message) {
+  for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message); cmsg != nullptr;
+       cmsg = CMSG_NXTHDR(&message, cmsg)) {
+    // Other control messages (timestamps, TTL, ...) may be present.
+    if (cmsg->cmsg_level != IPPROTO_IP || cmsg->cmsg_type != IP_PKTINFO ||
+        cmsg->cmsg_len < CMSG_LEN(sizeof(struct in_pktinfo))) {
+      continue;
+    }
+    struct in_pktinfo info {};
+    std::memcpy(&info, CMSG_DATA(cmsg), sizeof(info));
+    return ntohl(info.ipi_addr.s_addr);
+  }
+  return std::nullopt;
+}
+
 bool RoutingBusLink::poll_group_telegram(std::uint16_t& out_group_addr,
                                          std::vector<std::uint8_t>& out_apdu) {
   if (fd_ < 0) {
@@ -230,13 +249,32 @@ bool RoutingBusLink::poll_group_telegram(std::uint16_t& out_group_addr,
 
   std::uint8_t buffer[kReceiveBufferBytes];  // NOLINT(modernize-avoid-c-arrays)
   for (;;) {
-    const ssize_t received = ::recv(fd_, buffer, sizeof(buffer), 0);
+    struct iovec iov {};
+    iov.iov_base = buffer;
+    iov.iov_len = sizeof(buffer);
+    alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(struct in_pktinfo))] = {};
+    struct msghdr message {};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+
+    const ssize_t received = ::recvmsg(fd_, &message, 0);
     if (received <= 0) {
       return false;  // EAGAIN or error — nothing (more) to read
     }
-    const std::vector<std::uint8_t> datagram(buffer,
-                                             buffer + static_cast<std::ptrdiff_t>(received));
-    const auto cemi_payload = knxnetip::parse_routing_indication(datagram);
+    const auto addressed_to = destination_of(message);
+    // GCOV_EXCL_START - a kernel that ignored IP_PKTINFO is a host
+    // configuration problem and cannot be injected from a test
+    if (!addressed_to) {
+      continue;  // cannot be verified → drop
+    }
+    // GCOV_EXCL_STOP
+    if (*addressed_to != destination_) {
+      continue;  // sent to some other address, not to the KNX routing group
+    }
+    const std::span<const std::uint8_t> datagram(buffer, static_cast<std::size_t>(received));
+    const auto cemi_payload = knxnetip::parse_routing_payload(datagram);
     if (!cemi_payload) {
       continue;  // other service types are ignored
     }

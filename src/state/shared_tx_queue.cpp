@@ -36,7 +36,8 @@ SharedTxQueue::~SharedTxQueue() {
     eventfd_ = -1;
   }
   if (data_ != nullptr && owns_mmap_) {
-    ::pthread_mutex_destroy(&data_->mutex);
+    // The process-shared mutex is deliberately not destroyed: a worker that
+    // unwinds normally must not tear down the object the whole pool uses.
     ::munmap(data_, sizeof(SharedTxQueueData));
     data_ = nullptr;
     owns_mmap_ = false;
@@ -99,22 +100,37 @@ void SharedTxQueue::attach(SharedTxQueueData* data) {
 namespace {
 
 /// Lock helper that recovers a robust mutex whose owner died (EOWNERDEAD).
+///
+/// `acquired()` is false only for an unrecoverable error, and the destructor
+/// then leaves the mutex alone — unlocking a mutex you do not own is undefined
+/// behaviour.
 class QueueLock {
 public:
   explicit QueueLock(pthread_mutex_t& mutex) : mutex_(mutex) {
     const int rc = ::pthread_mutex_lock(&mutex_);
+    owned_ = (rc == 0);
     if (rc == EOWNERDEAD) {
       // The previous owner died mid-operation.  The ring indices are POD and
       // updated under the lock, so the state is still consistent.
       ::pthread_mutex_consistent(&mutex_);
+      owned_ = true;
     }
   }
-  ~QueueLock() { ::pthread_mutex_unlock(&mutex_); }
+  ~QueueLock() {
+    if (owned_) {  // GCOV_EXCL_BR_LINE - a failed lock needs an invalid mutex
+      ::pthread_mutex_unlock(&mutex_);
+    }
+  }
   QueueLock(const QueueLock&) = delete;
   QueueLock& operator=(const QueueLock&) = delete;
+  QueueLock(QueueLock&&) = delete;
+  QueueLock& operator=(QueueLock&&) = delete;
+
+  [[nodiscard]] bool acquired() const { return owned_; }
 
 private:
   pthread_mutex_t& mutex_;
+  bool owned_ = false;
 };
 
 }  // namespace

@@ -16,6 +16,12 @@
 /**
  * @file test_cemi.cpp
  * @brief Hex vectors are the contract for the cEMI codec.
+ *
+ * The decoder must handle every cEMI message type a KNXnet/IP interface can
+ * emit: it has to *drop* what is irrelevant (confirmations, requests, bus
+ * monitor, raw frames, property access, individual addressing) and parse a
+ * group `L_Data.ind` correctly, including a non-empty additional info block
+ * and both the standard and the extended frame format.
  */
 
 #include <gtest/gtest.h>
@@ -30,40 +36,44 @@ namespace {
 
 using Bytes = std::vector<std::uint8_t>;
 
+// ===========================================================================
+// Encoding
+// ===========================================================================
+
 TEST(CemiTest, EncodeGroupWriteOneByte) {
-  const auto frame = encode_group_request(0x1101, 0x0A03, {0x00, 0x80, 0x42});
+  const auto frame = encode_group_request(0x1101, 0x0A03, Bytes{0x00, 0x80, 0x42});
   const Bytes expected = {0x11, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
   EXPECT_EQ(frame, expected);
 }
 
 TEST(CemiTest, EncodeGroupWriteTwoBytes) {
-  const auto frame = encode_group_request(0x0000, 0x0A03, {0x00, 0x80, 0x0C, 0x6F});
+  const auto frame = encode_group_request(0x0000, 0x0A03, Bytes{0x00, 0x80, 0x0C, 0x6F});
   ASSERT_EQ(frame.size(), 13U);
   EXPECT_EQ(frame[8], 0x03);  // length byte = APDU octets - 1
   EXPECT_EQ(Bytes(frame.begin() + 9, frame.end()), (Bytes{0x00, 0x80, 0x0C, 0x6F}));
 }
 
 TEST(CemiTest, EncodeGroupValueRead) {
-  const auto frame = encode_group_request(0x1101, 0x0A03, {0x00, 0x00});
+  const auto frame = encode_group_request(0x1101, 0x0A03, Bytes{0x00, 0x00});
   ASSERT_EQ(frame.size(), 11U);
   EXPECT_EQ(frame[8], 0x01);
   EXPECT_EQ(Bytes(frame.begin() + 9, frame.end()), (Bytes{0x00, 0x00}));
 }
 
 TEST(CemiTest, EncodeEmptyApduRejected) {
-  EXPECT_TRUE(encode_group_request(0x1101, 0x0A03, {}).empty());
-  EXPECT_TRUE(encode_group_indication(0x1101, 0x0A03, {}).empty());
+  EXPECT_TRUE(encode_group_request(0x1101, 0x0A03, Bytes{}).empty());
+  EXPECT_TRUE(encode_group_indication(0x1101, 0x0A03, Bytes{}).empty());
 }
 
 TEST(CemiTest, EncodeGroupIndicationOneByte) {
   // Routing participants send indications: the message code is 0x29.
-  const auto frame = encode_group_indication(0xFFFA, 0x0A03, {0x00, 0x80, 0x42});
+  const auto frame = encode_group_indication(0xFFFA, 0x0A03, Bytes{0x00, 0x80, 0x42});
   const Bytes expected = {0x29, 0x00, 0xBC, 0xE0, 0xFF, 0xFA, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
   EXPECT_EQ(frame, expected);
 }
 
 TEST(CemiTest, EncodeGroupIndicationTwoBytes) {
-  const auto frame = encode_group_indication(0x1101, 0x0A03, {0x00, 0x80, 0x0C, 0x6F});
+  const auto frame = encode_group_indication(0x1101, 0x0A03, Bytes{0x00, 0x80, 0x0C, 0x6F});
   ASSERT_EQ(frame.size(), 13U);
   EXPECT_EQ(frame[0], kMessageCodeLDataInd);
   EXPECT_EQ(frame[8], 0x03);  // length byte = APDU octets - 1
@@ -71,7 +81,7 @@ TEST(CemiTest, EncodeGroupIndicationTwoBytes) {
 }
 
 TEST(CemiTest, IndicationRoundTripsThroughTheParser) {
-  const auto frame = encode_group_indication(0x1101, 0x0A04, {0x00, 0x80, 0x01});
+  const auto frame = encode_group_indication(0x1101, 0x0A04, Bytes{0x00, 0x80, 0x01});
   const auto parsed = parse_ldata_ind(frame);
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->source, 0x1101);
@@ -79,18 +89,48 @@ TEST(CemiTest, IndicationRoundTripsThroughTheParser) {
   EXPECT_EQ(parsed->apdu, (Bytes{0x00, 0x80, 0x01}));
 }
 
+// ===========================================================================
+// Decoding: the interesting case
+// ===========================================================================
+
 TEST(CemiTest, ParseLDataIndGroupWrite) {
   const Bytes raw = {0x29, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
   const auto frame = parse_ldata_ind(raw);
   ASSERT_TRUE(frame.has_value());
-  EXPECT_TRUE(frame->is_group);
   EXPECT_EQ(frame->source, 0x1101);
   EXPECT_EQ(frame->destination, 0x0A03);
   EXPECT_EQ(frame->apdu, (Bytes{0x00, 0x80, 0x42}));
 }
 
+/// A frame carrying additional info (legal, e.g. from a coupler) must be
+/// parsed with every field taken *after* the additional info block.
+TEST(CemiTest, ParseLDataIndSkipsAdditionalInfo) {
+  // additional_info_len = 3; the three octets 0xAA 0xBB 0xCC must be skipped.
+  const Bytes raw = {0x29, 0x03, 0xAA, 0xBB, 0xCC, 0xBC, 0xE0, 0x11,
+                     0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
+  const auto frame = parse_ldata_ind(raw);
+  ASSERT_TRUE(frame.has_value());
+  EXPECT_EQ(frame->source, 0x1101) << "control fields were read at the wrong offset";
+  EXPECT_EQ(frame->destination, 0x0A03);
+  EXPECT_EQ(frame->apdu, (Bytes{0x00, 0x80, 0x42}));
+}
+
+/// The standard frame format (control 1 bit 7 = 1) and the extended frame
+/// format (bit 7 = 0) share the cEMI layout; both must parse.
+TEST(CemiTest, ParseLDataIndAcceptsExtendedFrameFormat) {
+  // Extended frame: 0x3C = 0b00111100 (bit 7 clear), hop count 6.
+  const Bytes raw = {0x29, 0x00, 0x3C, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
+  const auto frame = parse_ldata_ind(raw);
+  ASSERT_TRUE(frame.has_value());
+  EXPECT_EQ(frame->destination, 0x0A03);
+}
+
+// ===========================================================================
+// Decoding: everything that must be dropped, early and unambiguously
+// ===========================================================================
+
 TEST(CemiTest, ParseLDataIndIgnoresIndividualDestination) {
-  // Control field 2 without the group bit.
+  // Control field 2 without the group bit: programming / management traffic.
   const Bytes raw = {0x29, 0x00, 0xBC, 0x60, 0x11, 0x01, 0x11, 0x02, 0x01, 0x00, 0x81};
   EXPECT_FALSE(parse_ldata_ind(raw).has_value());
 }
@@ -101,13 +141,24 @@ TEST(CemiTest, ParseLDataIndDropsConfirmations) {
   EXPECT_FALSE(parse_ldata_ind(raw).has_value());
 }
 
-TEST(CemiTest, ParseLDataIndDropsBusmonitorAndRequests) {
-  EXPECT_FALSE(
-      parse_ldata_ind(Bytes{0x2F, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42})
-          .has_value());
-  EXPECT_FALSE(
-      parse_ldata_ind(Bytes{0x11, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42})
-          .has_value());
+/// Every other cEMI message type is irrelevant for this backend.  None of
+/// them may be mistaken for a group value — even though several carry the
+/// same byte pattern after their (different) header.
+TEST(CemiTest, ParseDropsEveryOtherMessageCode) {
+  const Bytes payload = {0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
+  for (const std::uint8_t code :
+       {kMessageCodeLRawReq, kMessageCodeLDataReq, kMessageCodeLPollDataReq, kMessageCodeLBusyReq,
+        kMessageCodeLBusyInd, kMessageCodeLPollDataCon, kMessageCodeLBusmonInd, kMessageCodeLRawInd,
+        kMessageCodeLRawCon, kMessageCodeMResetInd, kMessageCodeMResetReq,
+        kMessageCodeMPropWriteCon, kMessageCodeMPropWriteReq, kMessageCodeMPropInfoInd,
+        kMessageCodeMFuncPropCommand, kMessageCodeMFuncPropStateRead,
+        kMessageCodeMFuncPropCommandCon, kMessageCodeMPropReadCon, kMessageCodeMPropReadReq}) {
+    Bytes raw;
+    raw.push_back(code);
+    raw.insert(raw.end(), payload.begin(), payload.end());
+    EXPECT_FALSE(parse_ldata_ind(raw).has_value())
+        << "message code 0x" << std::hex << static_cast<int>(code) << " was accepted";
+  }
 }
 
 TEST(CemiTest, ParseTruncatedFrameRejected) {
@@ -118,20 +169,42 @@ TEST(CemiTest, ParseTruncatedFrameRejected) {
   }
 }
 
-TEST(CemiTest, ParseLengthMismatchRejected) {
-  // Length byte says 3 APDU octets but only 3 are present in total.
-  const Bytes raw = {0x29, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x03, 0x00, 0x80};
+TEST(CemiTest, ParsePaddedFrameRejected) {
+  Bytes raw = {0x29, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42, 0x00};
   EXPECT_FALSE(parse_ldata_ind(raw).has_value());
 }
 
-TEST(CemiTest, EncodeThenParseRoundTrips) {
-  const auto encoded = encode_group_request(0x1101, 0x0A03, {0x00, 0x80, 0x0C, 0x6F});
-  Bytes indication = encoded;
-  indication[0] = kMessageCodeLDataInd;
-  const auto frame = parse_ldata_ind(indication);
+/// An additional info length that exceeds the buffer must be rejected without
+/// reading past the end.
+TEST(CemiTest, ParseAdditionalInfoBeyondBufferRejected) {
+  const Bytes raw = {0x29, 0xF0, 0xAA, 0xBB, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x02, 0x00};
+  EXPECT_FALSE(parse_ldata_ind(raw).has_value());
+}
+
+/// A frame with a single APDU octet (length byte 0) is legal.
+TEST(CemiTest, ParseSingleOctetApdu) {
+  const Bytes raw = {0x29, 0x00, 0xBC, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x00, 0x00};
+  const auto frame = parse_ldata_ind(raw);
   ASSERT_TRUE(frame.has_value());
-  EXPECT_EQ(frame->destination, 0x0A03);
-  EXPECT_EQ(frame->apdu, (Bytes{0x00, 0x80, 0x0C, 0x6F}));
+  ASSERT_EQ(frame->apdu.size(), 1U);
+  EXPECT_EQ(frame->apdu[0], 0x00);
+}
+
+TEST(CemiTest, ParseLongApdu) {
+  // Extended frames can carry up to 254 APDU octets; the length octet drives
+  // the parse, so a long value is accepted as-is.
+  Bytes raw = {0x29, 0x00, 0x3C, 0xE0, 0x11, 0x01, 0x0A, 0x03, 0x0F};
+  for (std::uint8_t i = 0; i < 16; ++i) {
+    raw.push_back(i);
+  }
+  const auto frame = parse_ldata_ind(raw);
+  ASSERT_TRUE(frame.has_value());
+  EXPECT_EQ(frame->apdu.size(), 16U);
+}
+
+TEST(CemiTest, ParseEmptyBufferAndNullptr) {
+  EXPECT_FALSE(parse_ldata_ind(Bytes{}).has_value());
+  EXPECT_FALSE(parse_ldata_ind(std::span<const std::uint8_t>{}).has_value());
 }
 
 }  // namespace

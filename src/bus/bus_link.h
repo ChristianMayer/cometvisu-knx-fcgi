@@ -67,6 +67,16 @@ public:
   [[nodiscard]] virtual bool poll_group_telegram(uint16_t& out_group_addr,
                                                  std::vector<uint8_t>& out_apdu) = 0;
 
+  /// Minimum interval between two consecutive send_group_packet() calls, in
+  /// milliseconds; 0 = as fast as the transport accepts them.
+  ///
+  /// The cache reader honours this by *waiting* between sends (the wait is a
+  /// poll() timeout, so reception is never blocked).  Transports that would
+  /// flood an upstream daemon — knxd's IP tunnel drops telegrams when they
+  /// arrive faster than 50 ms apart — override it instead of sleeping inside
+  /// send_group_packet(), which would stall the receive path.
+  [[nodiscard]] virtual int min_send_interval_ms() const { return 0; }
+
   /// poll()-able fd, or -1 when the transport has none.
   [[nodiscard]] virtual int get_fd() const = 0;
 
@@ -97,6 +107,11 @@ public:
 
   /// Human readable target for log lines, e.g. "knxd at /run/knx".
   [[nodiscard]] virtual std::string label() const = 0;
+
+  /// True when the transport has no connection state at all (KNXnet/IP
+  /// routing: fire-and-forget multicast).  A successful connect() then proves
+  /// nothing about the bus, and a startup probe must not claim otherwise.
+  [[nodiscard]] virtual bool is_stateless() const { return false; }
 };
 
 }  // namespace cvknx

@@ -23,10 +23,6 @@
     "branch": 100.0,
     "line": 100.0
   },
-  "src/bus/cache_reader.h": {
-    "branch": 100.0,
-    "line": 100.0
-  },
   "src/bus/shared_tx_bus_link.cpp": {
     "branch": 100.0,
     "line": 100.0
@@ -76,6 +72,10 @@
     "line": 100.0
   },
   "src/knxd/knxd_client.cpp": {
+    "branch": 100.0,
+    "line": 100.0
+  },
+  "src/knxd/knxd_client.h": {
     "branch": 100.0,
     "line": 100.0
   },
@@ -136,14 +136,6 @@
     "line": 100.0
   },
   "src/router/router.h": {
-    "branch": 100.0,
-    "line": 100.0
-  },
-  "src/state/group_cache.cpp": {
-    "branch": 100.0,
-    "line": 100.0
-  },
-  "src/state/group_cache.h": {
     "branch": 100.0,
     "line": 100.0
   },

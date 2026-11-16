@@ -17,27 +17,35 @@
  * @file cemi.h
  * @brief cEMI frame codec (KNX link layer) for the direct transports.
  *
- * Layout (standard frame):
+ * cEMI (Common External Message Interface, KNX 03_08_01) wraps one link-layer
+ * frame in a message code and a variable-length "additional information"
+ * block:
  *
  * @code
- * [0]     message code      0x11 L_Data.req | 0x29 L_Data.ind | 0x2E L_Data.con
- * [1]     additional info length 0x00
- * [2]     control field 1
- * [3]     control field 2
- * [4..5]  source address (individual address)
- * [6..7]  destination address (group or individual)
- * [8]     length = (number of APDU octets) - 1
- * [9..]   APDU (TPCI/APCI + data)
+ * [0]     message code        see MessageCode below
+ * [1]     additional info length (0..255)
+ * [2..]   additional info     transport specific, MUST be skipped
+ * +0      control field 1     bit 7: 1 = standard frame, 0 = extended frame
+ * +1      control field 2     bit 7: 1 = group destination, 0 = individual
+ * +2..+3  source address      individual address of the sender
+ * +4..+5  destination address group or individual
+ * +6      length              number of APDU octets - 1
+ * +7..    APDU                TPCI/APCI + data
  * @endcode
  *
- * Control fields used when sending: 0xBC (standard frame, repeat not allowed,
- * system broadcast, low priority) and 0xE0 (group destination, hop count 6).
- * Received frames are parsed generically — they are never compared against
- * these values.
+ * The offsets after the control fields are **relative to the end of the
+ * additional info block** — a frame with additional information is legal and
+ * is emitted by couplers and by frames carrying PL/RF information.  Both the
+ * standard and the extended frame format use this same cEMI layout: the
+ * frame-type bit only records which wire format the frame had.
  *
- * Only L_Data.ind reaches the cache.  L_Data.con confirms *our own* write and
- * must be dropped, otherwise every write would be delivered twice (AGENTS.md
- * rule 1).
+ * Only `L_Data.ind` with a group destination carries a group value.  Every
+ * other message code is irrelevant for this backend and is rejected as early
+ * as it can be recognised — before any offset is computed, so a foreign
+ * layout (bus monitor, raw frame, property access, reset, ...) can never be
+ * misread as a group value.  `L_Data.con` in particular confirms *our own*
+ * write and must be dropped, otherwise every write would be delivered twice
+ * (AGENTS.md rule 1).
  *
  * Which message code a *write* uses depends on the transport:
  *   - `ip-tunnel` sends L_Data.req (0x11): the client asks the interface to
@@ -53,24 +61,56 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace cvknx::cemi {
 
-inline constexpr std::uint8_t kMessageCodeLDataReq = 0x11;
-inline constexpr std::uint8_t kMessageCodeLDataInd = 0x29;
-inline constexpr std::uint8_t kMessageCodeLDataCon = 0x2E;
+/// cEMI message codes (KNX 03_08_01, message code octet).
+///
+/// The list is the complete set of link-layer and management messages a
+/// KNXnet/IP interface can emit.  Only `kMessageCodeLDataInd` is bus traffic
+/// for this backend; the others exist so that the parser and its tests can
+/// name them.
+enum MessageCode : std::uint8_t {
+  kMessageCodeLRawReq = 0x10,
+  kMessageCodeLDataReq = 0x11,
+  kMessageCodeLPollDataReq = 0x13,
+  kMessageCodeLBusyReq = 0x21,
+  kMessageCodeLBusyInd = 0x23,
+  kMessageCodeLPollDataCon = 0x25,
+  kMessageCodeLDataInd = 0x29,
+  kMessageCodeLBusmonInd = 0x2B,
+  kMessageCodeLRawInd = 0x2D,
+  kMessageCodeLDataCon = 0x2E,
+  kMessageCodeLRawCon = 0x2F,
+  kMessageCodeMResetInd = 0xF0,
+  kMessageCodeMResetReq = 0xF1,
+  kMessageCodeMPropWriteCon = 0xF5,
+  kMessageCodeMPropWriteReq = 0xF6,
+  kMessageCodeMPropInfoInd = 0xF7,
+  kMessageCodeMFuncPropCommand = 0xF8,
+  kMessageCodeMFuncPropStateRead = 0xF9,
+  kMessageCodeMFuncPropCommandCon = 0xFA,
+  kMessageCodeMPropReadCon = 0xFB,
+  kMessageCodeMPropReadReq = 0xFC,
+};
 
-inline constexpr std::uint8_t kControl1Standard = 0xBC;
+/// Control field 1 of a frame we send: standard frame, repeat not allowed,
+/// system broadcast, low priority.
+inline constexpr std::uint8_t kControl1StandardFrame = 0xBC;
+/// Control field 2 of a frame we send: group destination, hop count 6.
 inline constexpr std::uint8_t kControl2Group = 0xE0;
 
-/// A decoded link-layer frame.
+/// A decoded group-value link-layer frame.
 struct CemiFrame {
-  bool is_group = false;           ///< destination is a group address
   std::uint16_t source = 0;        ///< individual address of the sender
-  std::uint16_t destination = 0;   ///< group (or individual) address
+  std::uint16_t destination = 0;   ///< group address
   std::vector<std::uint8_t> apdu;  ///< TPCI/APCI + data
 };
+
+/// Byte buffer produced by the encoders (named so call sites read clearly).
+using Bytes = std::vector<std::uint8_t>;
 
 /// Encode an L_Data.req for a group value (tunnelling clients).
 /// @param source Individual address (0x0000 = let the device fill it in).
@@ -80,7 +120,7 @@ struct CemiFrame {
 ///         length byte would underflow).
 [[nodiscard]] std::vector<std::uint8_t> encode_group_request(std::uint16_t source,
                                                              std::uint16_t destination,
-                                                             const std::vector<std::uint8_t>& apdu);
+                                                             std::span<const std::uint8_t> apdu);
 
 /// Encode an L_Data.ind for a group value (routing participants).
 ///
@@ -88,15 +128,18 @@ struct CemiFrame {
 /// a frame from 0.0.0, and a source that belongs to one of its own tunnel
 /// clients (knxd does this) as well.
 /// @return the cEMI frame, or an empty vector when @p apdu is empty.
-[[nodiscard]] std::vector<std::uint8_t> encode_group_indication(
-    std::uint16_t source, std::uint16_t destination, const std::vector<std::uint8_t>& apdu);
+[[nodiscard]] std::vector<std::uint8_t> encode_group_indication(std::uint16_t source,
+                                                                std::uint16_t destination,
+                                                                std::span<const std::uint8_t> apdu);
 
 /// Parse an L_Data.ind with a group destination.
+///
+/// Frames that are irrelevant for the backend are rejected as early as
+/// possible: a different message code first (no offset is computed at all),
+/// then a destination that is not a group address, then any length mismatch.
+///
 /// @return the frame, or std::nullopt for any other message code, a truncated
-///         frame, an individual destination or a length mismatch.
-[[nodiscard]] std::optional<CemiFrame> parse_ldata_ind(const std::uint8_t* data, std::size_t size);
-
-/// Convenience overload.
-[[nodiscard]] std::optional<CemiFrame> parse_ldata_ind(const std::vector<std::uint8_t>& data);
+///         or padded frame, or an individual destination.
+[[nodiscard]] std::optional<CemiFrame> parse_ldata_ind(std::span<const std::uint8_t> data);
 
 }  // namespace cvknx::cemi

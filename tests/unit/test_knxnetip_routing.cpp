@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -119,7 +120,7 @@ TEST(RoutingBusLinkTest, SendsRoutingIndicationWithCemi) {
   // A routing participant is a router: the cEMI must be an L_Data.ind with its
   // own individual address.  An L_Data.req is dropped by every real router.
   const Bytes expected = knxnetip::build_routing_indication(
-      cemi::encode_group_indication(0xFFFA, 0x0A03, {0x00, 0x80, 0x42}));
+      cemi::encode_group_indication(0xFFFA, 0x0A03, cemi::Bytes{0x00, 0x80, 0x42}));
   EXPECT_EQ(received, expected);
   ASSERT_FALSE(received.empty());
   EXPECT_EQ(received[6], cemi::kMessageCodeLDataInd);
@@ -262,6 +263,100 @@ TEST(RoutingBusLinkTest, IgnoresOtherServiceTypes) {
   std::uint16_t addr = 0;
   Bytes apdu;
   EXPECT_FALSE(link.poll_group_telegram(addr, apdu));
+}
+
+/// A routing participant cannot tell senders apart, but it can verify that a
+/// datagram was actually addressed to the KNX routing destination.  A unicast
+/// packet sprayed at the port by an unrelated host must be dropped, not parsed
+/// as bus traffic (IP_PKTINFO check).
+TEST(RoutingBusLinkTest, IgnoresDatagramsNotAddressedToTheRoutingGroup) {
+  UdpPeer peer;
+  RoutingOptions options;  // a real multicast group
+  options.port = peer.port();
+  options.bind_port = 0;
+  RoutingBusLink link(options);
+  if (!link.connect()) {
+    GTEST_SKIP() << "this host cannot join the KNXnet/IP routing group";
+  }
+
+  // Unicast to 127.0.0.1:<port> — the destination address of this datagram is
+  // not the routing group, so it must not reach the cache.
+  peer.send_to(link.local_port(),
+               Indication(0x0A03, Bytes{0x00, 0x80, 0x01}, cemi::kMessageCodeLDataInd));
+
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  EXPECT_FALSE(link.poll_group_telegram(addr, apdu))
+      << "a datagram addressed elsewhere was parsed as bus traffic";
+  EXPECT_EQ(link.get_telegram_count(), 0U);
+}
+
+/// Destination extraction from the control messages of a received datagram.
+TEST(RoutingBusLinkDestination, ReturnsThePktinfoAddress) {
+  alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(struct in_pktinfo))] = {};
+  struct msghdr message {};
+  message.msg_control = control;
+  message.msg_controllen = sizeof(control);
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message);
+  ASSERT_NE(cmsg, nullptr);
+  cmsg->cmsg_level = IPPROTO_IP;
+  cmsg->cmsg_type = IP_PKTINFO;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+  struct in_pktinfo info {};
+  info.ipi_addr.s_addr = htonl(0xE000170CU);  // 224.0.23.12
+  std::memcpy(CMSG_DATA(cmsg), &info, sizeof(info));
+
+  const auto destination = RoutingBusLink::destination_of(message);
+  ASSERT_TRUE(destination.has_value());
+  EXPECT_EQ(*destination, 0xE000170CU);
+}
+
+/// A datagram without destination information cannot be verified.
+TEST(RoutingBusLinkDestination, ReportsNoDestinationWithoutPktinfo) {
+  struct msghdr message {};
+  EXPECT_FALSE(RoutingBusLink::destination_of(message).has_value());
+
+  // A different control message (e.g. a timestamp) is skipped.
+  alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(struct timeval))] = {};
+  message.msg_control = control;
+  message.msg_controllen = sizeof(control);
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message);
+  ASSERT_NE(cmsg, nullptr);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SO_TIMESTAMP;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(struct timeval));
+  EXPECT_FALSE(RoutingBusLink::destination_of(message).has_value());
+}
+
+/// A different IP-level control message is skipped as well.
+TEST(RoutingBusLinkDestination, SkipsNonPktinfoIpControlMessages) {
+  alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))] = {};
+  struct msghdr message {};
+  message.msg_control = control;
+  message.msg_controllen = sizeof(control);
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message);
+  ASSERT_NE(cmsg, nullptr);
+  cmsg->cmsg_level = IPPROTO_IP;
+  cmsg->cmsg_type = IP_TTL;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  EXPECT_FALSE(RoutingBusLink::destination_of(message).has_value());
+}
+
+/// A truncated IP_PKTINFO (a kernel bug) must not be read.
+TEST(RoutingBusLinkDestination, IgnoresATruncatedPktinfo) {
+  alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(struct in_pktinfo))] = {};
+  struct msghdr message {};
+  message.msg_control = control;
+  message.msg_controllen = sizeof(control);
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message);
+  ASSERT_NE(cmsg, nullptr);
+  cmsg->cmsg_level = IPPROTO_IP;
+  cmsg->cmsg_type = IP_PKTINFO;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo)) - 1;  // too short
+  EXPECT_FALSE(RoutingBusLink::destination_of(message).has_value());
 }
 
 TEST(RoutingBusLinkTest, SendFailsWhenNotConnected) {

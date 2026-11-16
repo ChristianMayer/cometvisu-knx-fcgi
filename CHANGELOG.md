@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SESSION_TTL_SEC` / `SESSION_MAX`** (default `1800` / `10000`): session
+  lifetime and the number of concurrent sessions.  A *session* lives for
+  minutes — it is deliberately independent of the request wait limit.
+- **`KNX_CACHE_CAPACITY`** (default `16384`): number of distinct group
+  addresses kept in the shared cache.
+
 - **Direct KNXnet/IP tunnelling** (`KNX_TRANSPORT=ip-tunnel`): the backend is a
   client of a KNX IP interface or router — no knxd required.  Includes the
   tunnel handshake, acknowledgement and retransmission, rejection of duplicate
@@ -48,6 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/r` answers 400 for an unparsable `t`** and every request wait is capped
+  at **330 s** (`kMaxClientWaitSec`), a little above the client's own 300 s
+  long-poll re-create.  A client can no longer pin a worker with `t=999999`.
+- **`/w` answers 400 for a value that is not a `A_GroupValue_Write`** (bad
+  hex, missing APCI, too long) instead of pretending success, and a partially
+  applied multi-address write reports `write partially failed` with the number
+  of failed addresses.
+- **The cache keeps the last `KNX_CACHE_CAPACITY` distinct addresses** (LRU
+  eviction) instead of dropping every new address once a fixed table of 2048
+  was full.
+- **Transport pacing belongs to the transport.**  `KnxdClient` no longer
+  sleeps 50 ms inside `send_group_packet()` (which stalled the receive path)
+  and no longer reconnects behind the cache reader's back; it declares
+  `min_send_interval_ms()` and the reader *waits* between sends, so inbound
+  telegrams keep flowing.
+
 - **One bus connection regardless of `FCGI_WORKERS`.**  All workers share the
   single bus link owned by the cache reader, so the worker count no longer
   multiplies knxd client slots (one instead of `FCGI_WORKERS + 1`) or KNXnet/IP
@@ -61,6 +83,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a binary without any knxd header or daemon.
 
 ### Fixed
+
+- **Login sessions did not work with more than one worker.**  The session
+  store was an ordinary member copied by `fork()`, so a session created by
+  `/l` was unknown to every other worker: with `FCGI_WORKERS=4` every
+  follow-up `/r`/`/w` answered `401` (verified 15/15).  Sessions now live in
+  shared memory like the caches, and the oldest session is evicted when
+  `SESSION_MAX` is reached.
+- **A cEMI frame with additional information was misparsed.**  Control
+  fields, source and destination were read at fixed offsets while the APDU
+  offset correctly accounted for the additional-info length, so a legal frame
+  with `additional_info_len > 0` produced wrong group addresses.  Only
+  `L_Data.ind` with a group destination is parsed now; every other message
+  code (`.req`, `.con`, bus monitor, raw, property access, reset) is rejected
+  before any offset is computed.
+- **`parse_apdu()` decoded the APCI from the wrong bits** and accepted the
+  reserved pattern `0xC0` as an "unknown type" with empty data, which then
+  reached the cache as an empty value.  The 4-bit APCI is now split across
+  both APDU octets as `(octet1 & 0x03) << 2 | (octet2 >> 6)`, only the three
+  group-value services are accepted, and the result is returned by value.
+- **`SharedGroupCache` could not store group address 0**, advanced `i` for
+  entries it dropped, compared timestamps with unsigned arithmetic (a
+  backwards clock step made every entry look 136 years old) and shared one
+  cache line between `position` and `generation`.
+- **`SessionStore::cleanup_expired()` and `count()` ran without the mutex**,
+  and `parse_env_int()` truncated a huge value into an `int` before the range
+  check.
+- **The KNXnet/IP tunnel accepted datagrams from any sender.**  The UDP socket
+  is connected to the configured device now, so the kernel filters by peer;
+  any frame also had to carry *our* channel before it counted as liveness.
+- **`ip-routing` accepted a unicast datagram sprayed at its port.**  Every
+  datagram's destination address is checked with `IP_PKTINFO` against the
+  configured routing group.
 
 - **`ip-routing` never exchanged a single frame with a real KNXnet/IP router.**
   The `ROUTING_INDICATION` service code was `0x0330`; the KNXnet/IP standard

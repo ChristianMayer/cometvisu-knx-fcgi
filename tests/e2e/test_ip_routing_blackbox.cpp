@@ -534,10 +534,10 @@ TEST_F(IpRoutingBlackBox, WriteSourceAddressIsTheConfiguredIndividualAddress) {
   EXPECT_EQ(cached, "01") << knxd_->log();
 }
 
-TEST_F(IpRoutingBlackBox, InvalidValuePublishesNothing) {
+TEST_F(IpRoutingBlackBox, InvalidValueIsRejectedAndPublishesNothing) {
   monitor_->drain();
   const auto response = write(group_text(27), "zz");
-  EXPECT_EQ(response.status, 200) << "an unusable value is a no-op";
+  EXPECT_EQ(response.status, 400) << "an unusable value is a client error";
   EXPECT_TRUE(backend_frames(group_value(27), 500).empty());
 }
 

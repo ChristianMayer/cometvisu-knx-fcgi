@@ -126,8 +126,9 @@ TEST_F(WriteHandlerTest, MissingValue) {
 TEST_F(WriteHandlerTest, InvalidHexValue) {
   WriteHandler handler(knxd_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&v=ZZ");
-  // Invalid hex: cannot decode, nothing to write, returns 200 (no-op)
-  EXPECT_EQ(result.http_status, 200);
+  // Invalid hex is a client error — answering 200 would pretend success.
+  EXPECT_EQ(result.http_status, 400);
+  EXPECT_NE(result.body.find("\"error\":\"invalid value\""), std::string::npos);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
@@ -140,19 +141,19 @@ TEST_F(WriteHandlerTest, InvalidAddress) {
 }
 
 // The reference eibwrite-cgi.c requires the first hex byte to contain
-// the A_GroupValue_Write APCI (bit 7 must be set). Values without
-// the APCI prefix are silently ignored (return 200, no packet sent).
+// the A_GroupValue_Write APCI (bit 7 must be set).  A value without it is a
+// client error: 400, no packet sent, never a silent "success".
 TEST_F(WriteHandlerTest, WriteValueWithoutApciIsRejected) {
   WriteHandler handler(knxd_, sessions_);
 
   // v=0c6f — first byte 0x0C does not have bit 7 set
   auto result = handler.handle("a=KNX:1/2/3&v=0c6f");
-  EXPECT_EQ(result.http_status, 200);
+  EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 
   // v=42 — single byte 0x42 does not have bit 7 set
   result = handler.handle("a=KNX:1/2/3&v=42");
-  EXPECT_EQ(result.http_status, 200);
+  EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
@@ -163,12 +164,12 @@ TEST_F(WriteHandlerTest, WriteValueWithReadApciIsRejected) {
 
   // v=000c6f — first byte 0x00 = Read APCI, not Write
   auto result = handler.handle("a=KNX:1/2/3&v=000c6f");
-  EXPECT_EQ(result.http_status, 200);
+  EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 
   // v=400c6f — first byte 0x40 = Response APCI, not Write
   result = handler.handle("a=KNX:1/2/3&v=400c6f");
-  EXPECT_EQ(result.http_status, 200);
+  EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
@@ -238,7 +239,12 @@ TEST_F(WriteHandlerTest, PartialFailureReturns503) {
   WriteHandler handler(knxd_, sessions_);
   auto result = handler.handle("a=KNX:1/2/3&a=KNX:4/5/6&v=8042");
   EXPECT_EQ(result.http_status, 503);
-  EXPECT_NE(result.body.find("\"error\":\"write failed\""), std::string::npos);
+  // A partially applied multi-address write must say so instead of claiming a
+  // plain failure (or, worse, success).
+  EXPECT_NE(result.body.find("\"error\":\"write partially failed\""), std::string::npos)
+      << result.body;
+  EXPECT_NE(result.body.find("\"failed\":1"), std::string::npos) << result.body;
+  EXPECT_NE(result.body.find("\"total\":2"), std::string::npos) << result.body;
 }
 
 TEST_F(WriteHandlerTest, SendFailureClearedOnSubsequentCalls) {
@@ -305,16 +311,25 @@ TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
 // Value validation edge cases
 // ================================================================
 
-TEST_F(WriteHandlerTest, EmptyValueIsANoOp) {
+TEST_F(WriteHandlerTest, EmptyValueIsRejected) {
+  // An empty `v` is not a value: it is a client error, not a silent success.
   WriteHandler handler(knxd_, sessions_);
   auto r = handler.handle("a=1/2/3&v=");
-  EXPECT_EQ(r.http_status, 200);
+  EXPECT_EQ(r.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
-TEST_F(WriteHandlerTest, ValueWithoutApciIsANoOp) {
+TEST_F(WriteHandlerTest, ValueWithoutApciIsRejected) {
   WriteHandler handler(knxd_, sessions_);
   auto r = handler.handle("a=1/2/3&v=42");
-  EXPECT_EQ(r.http_status, 200);
+  EXPECT_EQ(r.http_status, 400);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+TEST_F(WriteHandlerTest, OverlongValueIsRejected) {
+  WriteHandler handler(knxd_, sessions_);
+  // 15 data bytes + APCI byte + the prepended 0x00 exceeds the ring limit.
+  auto r = handler.handle("a=1/2/3&v=80000102030405060708090a0b0c0d0e0f");
+  EXPECT_EQ(r.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }

@@ -33,6 +33,8 @@
 
 #pragma once
 
+#include <netinet/in.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,7 +61,6 @@ struct RoutingOptions {
 
   [[nodiscard]] static RoutingOptions from_config(const BusConfig& config);
 };
-
 class RoutingBusLink : public BusLink {
 public:
   explicit RoutingBusLink(const RoutingOptions& options);
@@ -82,15 +83,32 @@ public:
   void set_nonblocking(bool enable) override;
   [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
   [[nodiscard]] std::string label() const override;
+  /// Routing is stateless: there is no handshake and no outage detection.
+  [[nodiscard]] bool is_stateless() const override { return true; }
 
   /// Port the socket is actually bound to (useful for tests and logs).
   [[nodiscard]] std::uint16_t local_port() const { return local_port_; }
+
+  /// Destination address of a received datagram (host byte order), taken from
+  /// its `IP_PKTINFO` control message.
+  ///
+  /// A routing participant cannot tell sender addresses apart (every router
+  /// on the backbone is a legitimate source), but it can verify that the
+  /// datagram was actually sent to the KNX routing destination — a unicast
+  /// packet sprayed at our port by an unrelated host is dropped instead of
+  /// being parsed as bus traffic.
+  ///
+  /// @return the destination address, or std::nullopt when the kernel supplied
+  ///         none (such a datagram cannot be verified and is dropped).
+  [[nodiscard]] static std::optional<std::uint32_t> destination_of(struct msghdr& message);
 
 private:
   RoutingOptions options_;
   int fd_ = -1;
   std::uint16_t local_port_ = 0;
   std::uint64_t telegram_count_ = 0;
+  /// Parsed destination address (host byte order), valid while connected.
+  std::uint32_t destination_ = 0;
 };
 
 }  // namespace cvknx

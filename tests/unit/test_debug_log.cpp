@@ -344,4 +344,23 @@ TEST_F(DebugLogTest, KnxdSendAndRecvOmitEmptyDetails) {
   EXPECT_NE(out.find("KNXD SEND: group_packet addr=1/2/3\n"), std::string::npos) << out;
   EXPECT_NE(out.find("KNXD RECV: apdu addr=1/2/3\n"), std::string::npos) << out;
 }
+
+/// Every severity must produce the documented `[LEVEL] [timestamp] message`
+/// line, and operational lines are written even without DEBUG_BACKEND.
+TEST_F(DebugLogTest, EveryLevelWritesALevelPrefixedLine) {
+  DebugLog::set_enabled(false);
+  testing::internal::CaptureStderr();
+  DebugLog::log(DebugLog::Level::Info, "an informational line");
+  DebugLog::log(DebugLog::Level::Warn, "a warning line");
+  DebugLog::log(DebugLog::Level::Error, "an error line");
+  const std::string output = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(output.find("[INFO] ["), std::string::npos) << output;
+  EXPECT_NE(output.find("an informational line"), std::string::npos) << output;
+  EXPECT_NE(output.find("[WARN] ["), std::string::npos) << output;
+  EXPECT_NE(output.find("a warning line"), std::string::npos) << output;
+  EXPECT_NE(output.find("[ERROR] ["), std::string::npos) << output;
+  EXPECT_NE(output.find("an error line"), std::string::npos) << output;
+}
+
 }  // namespace cvknx

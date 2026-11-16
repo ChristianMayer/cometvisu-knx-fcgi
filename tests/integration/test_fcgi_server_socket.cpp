@@ -91,7 +91,7 @@ bool sockets_available() {
   if (s < 0) {
     return false;
   }
-  struct sockaddr_un addr{};
+  struct sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
   size_t path_len = path.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
   addr.sun_path[path_len] = '\0';
@@ -135,7 +135,7 @@ protected:
     if (fd < 0) {
       return -1;
     }
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     size_t path_len = socket_path_.copy(addr.sun_path, sizeof(addr.sun_path) - 1);
     addr.sun_path[path_len] = '\0';
@@ -209,12 +209,18 @@ static int fcgi_request_status(const std::string& socket_path, const std::string
                                const std::string& query_string) {
   // cgi-fcgi takes the CGI variables from the environment (not from stdin),
   // so pass the endpoint and query string that way.
-  std::string cmd = "REQUEST_METHOD=GET SCRIPT_NAME=" + path + " QUERY_STRING='" + query_string +
-                    "'"
-                    " SERVER_NAME=localhost SERVER_PORT=80 SERVER_PROTOCOL=HTTP/1.1"
-                    " CONTENT_TYPE=application/x-www-form-urlencoded CONTENT_LENGTH=0"
-                    " cgi-fcgi -bind -connect " +
-                    socket_path + " 2>/dev/null </dev/null";
+  // `env -u` the inherited CGI variables: cgi-fcgi forwards the environment it
+  // is started with, so a REQUEST_URI exported by the invoking shell would be
+  // served instead of the request this test intends to send.
+  std::string cmd =
+      "env -u REQUEST_URI -u PATH_INFO -u REQUEST_METHOD -u CONTENT_LENGTH"
+      " REQUEST_METHOD=GET SCRIPT_NAME=" +
+      path + " PATH_INFO=" + path + " QUERY_STRING='" + query_string +
+      "'"
+      " SERVER_NAME=localhost SERVER_PORT=80 SERVER_PROTOCOL=HTTP/1.1"
+      " CONTENT_TYPE=application/x-www-form-urlencoded CONTENT_LENGTH=0"
+      " cgi-fcgi -bind -connect " +
+      socket_path + " 2>/dev/null </dev/null";
 
   // NOLINTNEXTLINE(concurrency-mt-unsafe,cert-env33-c)
   FILE* pipe = popen(cmd.c_str(), "r");

@@ -131,7 +131,7 @@ std::optional<Frame> parse_frame(const std::uint8_t* data, std::size_t size) {
   return frame;
 }
 
-std::optional<Frame> parse_frame(const std::vector<std::uint8_t>& data) {
+std::optional<Frame> parse_frame(std::span<const std::uint8_t> data) {
   return parse_frame(data.data(), data.size());
 }
 
@@ -201,7 +201,7 @@ std::vector<std::uint8_t> build_connect_request(const Hpai& control, const Hpai&
   return build_frame(ServiceType::ConnectRequest, body);
 }
 
-std::optional<ConnectResponse> parse_connect_response(const std::vector<std::uint8_t>& frame) {
+std::optional<ConnectResponse> parse_connect_response(std::span<const std::uint8_t> frame) {
   const auto parsed = parse_frame(frame);
   if (!parsed) {
     return std::nullopt;
@@ -244,7 +244,7 @@ std::vector<std::uint8_t> build_disconnect_request(std::uint8_t channel, const H
   return build_frame(ServiceType::DisconnectRequest, body);
 }
 
-std::optional<StatusResponse> parse_status_response(const std::vector<std::uint8_t>& frame,
+std::optional<StatusResponse> parse_status_response(std::span<const std::uint8_t> frame,
                                                     ServiceType expected) {
   const auto parsed = parse_frame(frame);
   if (!parsed || parsed->service != expected || parsed->body.size() < 2) {
@@ -265,7 +265,7 @@ std::vector<std::uint8_t> build_tunnelling_request(std::uint8_t channel, std::ui
   return build_frame(ServiceType::TunnellingRequest, body);
 }
 
-std::optional<TunnellingRequest> parse_tunnelling_request(const std::vector<std::uint8_t>& frame) {
+std::optional<TunnellingRequest> parse_tunnelling_request(std::span<const std::uint8_t> frame) {
   const auto parsed = parse_frame(frame);
   if (!parsed) {
     return std::nullopt;
@@ -292,7 +292,7 @@ std::vector<std::uint8_t> build_tunnelling_ack(std::uint8_t channel, std::uint8_
   return build_frame(ServiceType::TunnellingAck, {0x04, channel, sequence, status});
 }
 
-std::optional<TunnellingAck> parse_tunnelling_ack(const std::vector<std::uint8_t>& frame) {
+std::optional<TunnellingAck> parse_tunnelling_ack(std::span<const std::uint8_t> frame) {
   const auto parsed = parse_frame(frame);
   if (!parsed) {
     return std::nullopt;
@@ -312,7 +312,7 @@ std::vector<std::uint8_t> build_routing_indication(const std::vector<std::uint8_
 }
 
 std::optional<std::vector<std::uint8_t>> parse_routing_indication(
-    const std::vector<std::uint8_t>& frame) {
+    std::span<const std::uint8_t> frame) {
   const auto parsed = parse_frame(frame);
   if (!parsed) {
     return std::nullopt;
@@ -326,11 +326,34 @@ std::optional<std::vector<std::uint8_t>> parse_routing_indication(
   return parsed->body;
 }
 
+std::optional<std::span<const std::uint8_t>> parse_routing_payload(
+    std::span<const std::uint8_t> frame) {
+  // Same checks as parse_frame(), but the payload is returned as a view into
+  // the caller's receive buffer instead of a copy.
+  if (frame.size() < kHeaderLength) {
+    return std::nullopt;
+  }
+  if (frame[0] != kHeaderLength || frame[1] != kProtocolVersion) {
+    return std::nullopt;
+  }
+  if (read_u16(frame.data() + 2) != static_cast<std::uint16_t>(ServiceType::RoutingIndication)) {
+    return std::nullopt;
+  }
+  if (read_u16(frame.data() + 4) != frame.size()) {
+    return std::nullopt;
+  }
+  const auto payload = frame.subspan(kHeaderLength);
+  if (payload.empty()) {
+    return std::nullopt;
+  }
+  return payload;
+}
+
 std::vector<std::uint8_t> build_search_request(const Hpai& control) {
   return build_frame(ServiceType::SearchRequest, encode_hpai(control));
 }
 
-std::optional<SearchResponse> parse_search_response(const std::vector<std::uint8_t>& frame) {
+std::optional<SearchResponse> parse_search_response(std::span<const std::uint8_t> frame) {
   const auto parsed = parse_frame(frame);
   if (!parsed) {
     return std::nullopt;

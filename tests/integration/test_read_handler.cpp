@@ -1222,3 +1222,25 @@ TEST_F(ReadHandlerTest, UnparsableIndexIsIgnored) {
   EXPECT_EQ(r.http_status, 200);
   EXPECT_NE(r.body.find(R"("i":0)"), std::string::npos) << r.body;
 }
+
+// ================================================================
+// Client wait limit
+// ================================================================
+
+TEST(ClientWaitLimit, ClampsToTheHardLimit) {
+  // A short wait is honoured ...
+  EXPECT_EQ(clamp_client_wait(10), 10);
+  EXPECT_EQ(clamp_client_wait(kMaxClientWaitSec), kMaxClientWaitSec);
+  // ... a longer one is cut at the hard limit (the client re-creates the
+  // request after 300 s, so 330 s never races with it) ...
+  EXPECT_EQ(clamp_client_wait(kMaxClientWaitSec + 1), kMaxClientWaitSec);
+  EXPECT_EQ(clamp_client_wait(999999), kMaxClientWaitSec);
+  // ... and "no wait" stays "no wait" (t=0 = read now, t<0 = cache only).
+  EXPECT_EQ(clamp_client_wait(0), 0);
+  EXPECT_EQ(clamp_client_wait(-42), -42);
+}
+
+TEST(ClientWaitLimit, TheHardLimitIsJustAboveTheClientTimeout) {
+  EXPECT_GE(kMaxClientWaitSec, 300);
+  EXPECT_LE(kMaxClientWaitSec, 360);
+}

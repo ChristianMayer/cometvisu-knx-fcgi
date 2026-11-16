@@ -353,14 +353,14 @@ TEST_F(KnxdClientProtocolTest, ConnectRejectsAnOverlongSocketPath) {
 TEST_F(KnxdClientProtocolTest, ConnectWithoutAnyPathFails) {
   KnxdClient client;
   EXPECT_FALSE(client.connect());
-  EXPECT_FALSE(client.reconnect());
+  EXPECT_FALSE(client.connect());
 }
 
 // ================================================================
 // Recovery paths
 // ================================================================
 
-TEST_F(KnxdClientProtocolTest, SendReconnectsWhenTheSocketIsBroken) {
+TEST_F(KnxdClientProtocolTest, SendDropsTheConnectionWhenTheWriteFails) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
 
@@ -368,45 +368,24 @@ TEST_F(KnxdClientProtocolTest, SendReconnectsWhenTheSocketIsBroken) {
   ASSERT_TRUE(client.connect());
   server_thread.join();
 
-  // knxd restarts: the inherited fd is dead.  The first write fails, the client
-  // reconnects and retries — a write must never be lost silently.
+  // knxd restarted: the inherited fd is dead.  The client must NOT reconnect on
+  // its own (that would block the receive path); it reports the failure and
+  // drops the socket so the cache reader can reconnect.
   server.close_peer();
   const int broken_fd = client.get_fd();
   ASSERT_GE(broken_fd, 0);
   ASSERT_EQ(::close(broken_fd), 0);
 
-  Joiner reconnect_thread(std::thread([&server] {
-    if (server.accept_one() < 0) {
-      return;
-    }
-    Bytes request;
-    (void)server.receive_message(request);
-    (void)server.send_message(EibMessageType::OPEN_GROUPCON, {});
-  }));
-  EXPECT_TRUE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
-  reconnect_thread.join();
+  EXPECT_FALSE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
+  EXPECT_FALSE(client.is_connected()) << "a failed write must expose the dead link";
 }
 
-TEST_F(KnxdClientProtocolTest, SendFailsWhenTheRetryCannotReconnect) {
-  FakeKnxdServer server;
-  KnxdClient client(server.path());
-
-  Joiner server_thread(std::thread([&server] { (void)accept_and_handshake(server, 0x00); }));
-  ASSERT_TRUE(client.connect());
-  server_thread.join();
-
-  // Both the socket and the fake knxd are gone: the reconnect after the failed
-  // write cannot succeed, so the send must report failure instead of pretending.
-  server.close_peer();
-  const int broken_fd = client.get_fd();
-  ASSERT_GE(broken_fd, 0);
-  ASSERT_EQ(::close(broken_fd), 0);
-  server.shutdown_listener();
-
+TEST_F(KnxdClientProtocolTest, SendFailsWithoutAConnection) {
+  KnxdClient client("/tmp/cvknx-missing-send-" + std::to_string(::getpid()) + ".sock");
   EXPECT_FALSE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
 }
 
-TEST_F(KnxdClientProtocolTest, PollReconnectsAfterThePeerWentAway) {
+TEST_F(KnxdClientProtocolTest, PollDropsTheConnectionWhenThePeerWentAway) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
 
@@ -414,30 +393,29 @@ TEST_F(KnxdClientProtocolTest, PollReconnectsAfterThePeerWentAway) {
   ASSERT_TRUE(client.connect());
   server_thread.join();
 
+  // The peer closes the connection: the poll reports "nothing" and marks the
+  // link dead, so the reader reconnects.
   server.close_peer();
-  Joiner reconnect_thread(std::thread([&server] {
-    if (server.accept_one() < 0) {
-      return;
-    }
-    Bytes request;
-    (void)server.receive_message(request);
-    (void)server.send_message(EibMessageType::OPEN_GROUPCON, {});
-    (void)server.send_message(EibMessageType::APDU_PACKET,
-                              apdu_payload(0x0A03, {0x00, 0x80, 0x07}));
-  }));
+  server.shutdown_listener();
 
   uint16_t group = 0;
   Bytes apdu;
-  EXPECT_TRUE(client.poll_group_telegram(group, apdu));
-  reconnect_thread.join();
-  EXPECT_EQ(group, 0x0A03);
+  EXPECT_FALSE(client.poll_group_telegram(group, apdu));
+  EXPECT_FALSE(client.is_connected());
 }
 
 // ================================================================
-// Rate limiting and accessors
+// Transport pacing (the interval the cache reader honours)
 // ================================================================
 
-TEST_F(KnxdClientProtocolTest, RateLimitsBackToBackWrites) {
+TEST_F(KnxdClientProtocolTest, DeclaresTheKnxdSendInterval) {
+  // The 50 ms interval that protects knxd's IP tunnel is a *transport
+  // property*: the cache reader waits between sends, this class never sleeps.
+  KnxdClient client("/tmp/unused.sock");
+  EXPECT_EQ(client.min_send_interval_ms(), 50);
+}
+
+TEST_F(KnxdClientProtocolTest, BackToBackWritesAreNotDelayed) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
 
@@ -451,8 +429,7 @@ TEST_F(KnxdClientProtocolTest, RateLimitsBackToBackWrites) {
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - start)
                            .count();
-  // The second write is delayed to honour the 50 ms minimum interval.
-  EXPECT_GE(elapsed, 40);
+  EXPECT_LT(elapsed, 40) << "sleeping here would stall the receive path";
 }
 
 TEST_F(KnxdClientProtocolTest, SettersAndGettersTolerateADisconnectedClient) {
@@ -520,22 +497,22 @@ TEST_F(KnxdClientProtocolTest, OpenGroupSocketReportsAWriteFailure) {
   EXPECT_FALSE(client.open_group_socket(false));
 }
 
-TEST_F(KnxdClientProtocolTest, ReconnectFailsWhenTheHandshakeFails) {
+TEST_F(KnxdClientProtocolTest, ConnectFailsWhenTheHandshakeFails) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
   client.set_handshake_timeout_ms(50);
 
   // Accept but never answer the handshake.
   Joiner server_thread(std::thread([&server] { (void)server.accept_one(); }));
-  EXPECT_FALSE(client.reconnect());
+  EXPECT_FALSE(client.connect());
   server_thread.join();
   EXPECT_FALSE(client.is_connected());
 }
 
-TEST_F(KnxdClientProtocolTest, EmptySocketPathMakesConnectAndReconnectFail) {
+TEST_F(KnxdClientProtocolTest, EmptySocketPathMakesConnectFail) {
   KnxdClient client("");
   EXPECT_FALSE(client.connect());
-  EXPECT_FALSE(client.reconnect());
+  EXPECT_FALSE(client.connect());
 }
 
 TEST_F(KnxdClientProtocolTest, SendAndPollFailWithoutAConnection) {
@@ -574,6 +551,26 @@ TEST_F(KnxdClientProtocolTest, HandshakeFailsWhenKnxdClosesImmediately) {
     server.close_peer();  // EOF instead of an answer
   }));
   EXPECT_FALSE(client.connect());
+  server_thread.join();
+}
+
+/// EOF while waiting for the OPEN_GROUPCON reply: the handshake fails instead
+/// of blocking until the deadline.  (Deterministic variant: the server reads
+/// the request first, so the client's write cannot fail before it reads.)
+TEST_F(KnxdClientProtocolTest, HandshakeFailsWhenThePeerClosesAfterTheRequest) {
+  FakeKnxdServer server;
+  KnxdClient client(server.path());
+
+  Joiner server_thread(std::thread([&server] {
+    if (server.accept_one() < 0) {
+      return;
+    }
+    Bytes request;
+    (void)server.receive_message(request);  // the OPEN_GROUPCON
+    server.close_peer();                    // EOF instead of an answer
+  }));
+  EXPECT_FALSE(client.connect());
+  EXPECT_FALSE(client.is_connected());
   server_thread.join();
 }
 
@@ -634,45 +631,18 @@ TEST_F(KnxdClientProtocolTest, ConnectFailsForAMissingSocketFile) {
   EXPECT_FALSE(client.is_connected());
 }
 
-TEST_F(KnxdClientProtocolTest, SecondWriteAfterTheRateLimitWindowIsImmediate) {
+TEST_F(KnxdClientProtocolTest, SendFailsWhenTheGroupSocketIsNotOpen) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
 
-  Joiner server_thread(std::thread([&server] { (void)accept_and_handshake(server, 0x00); }));
-  ASSERT_TRUE(client.connect());
-  server_thread.join();
-
-  ASSERT_TRUE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x01}));
-  std::this_thread::sleep_for(std::chrono::milliseconds(70));
-  const auto start = std::chrono::steady_clock::now();
-  ASSERT_TRUE(client.send_group_packet(0x0A04, {0x00, 0x80, 0x02}));
-  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - start)
-                           .count();
-  EXPECT_LT(elapsed, 40);
-}
-
-TEST_F(KnxdClientProtocolTest, SendReconnectsWhenTheGroupSocketIsNotOpen) {
-  FakeKnxdServer server;
-  KnxdClient client(server.path());
-
-  // connect(path) opens the socket but not the group socket.
+  // connect(path) opens the socket only — the group socket handshake is open_group_socket().
   ASSERT_TRUE(client.connect(server.path()));
-  // Drop the first connection (no handshake happened) and serve the reconnect.
-  Joiner server_thread(std::thread([&server] {
-    if (server.accept_one() < 0) {
-      return;
-    }
-    server.close_peer();
-    (void)accept_and_handshake(server, 0x00);
-  }));
-
-  EXPECT_TRUE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
-  server_thread.join();
-  EXPECT_TRUE(client.is_connected());
+  EXPECT_FALSE(client.send_group_packet(0x0A03, {0x00, 0x80, 0x42}))
+      << "without the group socket handshake no telegram may be reported as sent";
+  client.disconnect();
 }
 
-TEST_F(KnxdClientProtocolTest, PollReconnectsAfterAnExplicitDisconnect) {
+TEST_F(KnxdClientProtocolTest, PollFailsAfterAnExplicitDisconnect) {
   FakeKnxdServer server;
   KnxdClient client(server.path());
 
@@ -682,23 +652,11 @@ TEST_F(KnxdClientProtocolTest, PollReconnectsAfterAnExplicitDisconnect) {
 
   client.disconnect();
   ASSERT_FALSE(client.is_connected());
-
-  Joiner reconnect_thread(std::thread([&server] {
-    if (server.accept_one() < 0) {
-      return;
-    }
-    Bytes request;
-    (void)server.receive_message(request);
-    (void)server.send_message(EibMessageType::OPEN_GROUPCON, {});
-    (void)server.send_message(EibMessageType::APDU_PACKET,
-                              apdu_payload(0x0A03, {0x00, 0x80, 0x09}));
-  }));
+  server.shutdown_listener();
 
   uint16_t group = 0;
   Bytes apdu;
-  EXPECT_TRUE(client.poll_group_telegram(group, apdu));
-  reconnect_thread.join();
-  EXPECT_EQ(group, 0x0A03);
+  EXPECT_FALSE(client.poll_group_telegram(group, apdu));
 }
 
 TEST_F(KnxdClientProtocolTest, PollWithoutDataReturnsFalse) {
@@ -821,6 +779,49 @@ TEST_F(KnxdClientProtocolTest, PollHandlesAnEofAndABrokenDescriptor) {
     Bytes apdu;
     EXPECT_FALSE(client.poll_group_telegram(group, apdu));
   }
+}
+
+TEST_F(KnxdClientProtocolTest, LargeMessageShrinksTheReadBuffer) {
+  FakeKnxdServer server;
+  KnxdClient client(server.path());
+
+  Joiner server_thread(std::thread([&server] {
+    if (server.accept_one() < 0) {
+      return;
+    }
+    Bytes request;
+    (void)server.receive_message(request);
+    (void)server.send_message(EibMessageType::OPEN_GROUPCON, {});
+    // A payload far beyond the 4 KiB read chunk: after it is consumed the
+    // accumulation buffer is much larger than the next message needs.
+    // [src_pa 2][dst_ga 2][apdu ...]
+    Bytes payload(4 * 1024, 0x00);
+    payload[2] = 0x0A;
+    payload[3] = 0x03;
+    (void)server.send_message(EibMessageType::GROUP_PACKET, payload);
+  }));
+  ASSERT_TRUE(client.connect());
+  server_thread.join();
+
+  uint16_t group = 0;
+  Bytes apdu;
+  EXPECT_TRUE(client.poll_group_telegram(group, apdu));
+  EXPECT_EQ(group, 0x0A03);
+  EXPECT_EQ(apdu.size(), 4U * 1024 - 4);  // the payload after src_pa + dst_ga
+}
+
+TEST_F(KnxdClientProtocolTest, PollFailsWhenTheGroupSocketIsNotOpen) {
+  FakeKnxdServer server;
+  KnxdClient client(server.path());
+  // connect(path) opens the socket only — a telegram must not be reported
+  // before the group socket handshake.
+  ASSERT_TRUE(client.connect(server.path()));
+  server.shutdown_listener();
+
+  uint16_t group = 0;
+  Bytes apdu;
+  EXPECT_FALSE(client.poll_group_telegram(group, apdu));
+  client.disconnect();
 }
 
 }  // namespace

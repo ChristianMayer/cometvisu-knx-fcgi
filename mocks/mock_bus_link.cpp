@@ -42,15 +42,6 @@ void MockBusLink::disconnect() {
   }
 }
 
-bool MockBusLink::reconnect() {
-  if (last_socket_path_.empty()) {
-    return false;
-  }
-  connected_ = connection_success_;
-  group_socket_open_ = connection_success_;  // auto-reopen
-  return connected_;
-}
-
 bool MockBusLink::is_connected() const {
   return connected_;
 }
@@ -69,6 +60,10 @@ bool MockBusLink::send_group_packet(uint16_t addr, const std::vector<uint8_t>& a
   }
   if (send_fail_count_ > 0) {
     send_fail_count_--;
+    if (disconnect_on_send_failure_) {
+      connected_ = false;
+      group_socket_open_ = false;
+    }
     return false;
   }
   sent_packets_.push_back({addr, apdu});
@@ -128,6 +123,8 @@ void MockBusLink::reset() {
   wait_error_count_ = 0;
   connect_calls_ = 0;
   wait_calls_ = 0;
+  min_send_interval_ms_ = 0;
+  disconnect_on_send_failure_ = false;
 }
 
 }  // namespace cvknx

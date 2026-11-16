@@ -51,8 +51,6 @@ public:
   [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
   [[nodiscard]] std::string label() const override { return "mock bus link"; }
 
-  /// Reconnect using the last-known target (test helper, not part of BusLink).
-  [[nodiscard]] bool reconnect();
   /// Open the group socket (test helper, not part of BusLink).
   [[nodiscard]] bool open_group_socket(bool write_only);
 
@@ -70,6 +68,12 @@ public:
   void set_connect_fail_count(int count) { connect_fail_count_ = count; }
   /// Number of upcoming wait_for_activity() calls that report a lost connection.
   void set_wait_error_count(int count) { wait_error_count_ = count; }
+  /// Minimal interval between two sends, as a real transport would declare it.
+  void set_min_send_interval_ms(int interval_ms) { min_send_interval_ms_ = interval_ms; }
+  /// Drop the connection when a scripted send fails — the real transports do
+  /// exactly that so the cache reader notices the dead link.
+  void set_disconnect_on_send_failure(bool enable) { disconnect_on_send_failure_ = enable; }
+  [[nodiscard]] int min_send_interval_ms() const override { return min_send_interval_ms_; }
   /// Number of connect() calls so far (used to detect reconnect behaviour).
   [[nodiscard]] int connect_calls() const { return connect_calls_; }
   /// Number of wait_for_activity() calls so far (used to detect busy loops).
@@ -88,6 +92,8 @@ private:
   std::vector<SentPacket> sent_packets_;
   uint64_t telegram_count_ = 0;
   int send_fail_count_ = 0;
+  int min_send_interval_ms_ = 0;
+  bool disconnect_on_send_failure_ = false;
 };
 
 }  // namespace cvknx

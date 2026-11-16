@@ -40,7 +40,7 @@ void DebugLog::init_from_env() {
     enabled_ = false;
     return;
   }
-  // Accept "1", "true", "yes", "on" (case-insensitive prefix match)
+  // Accept "1", "true", "yes", "on" (exact, case sensitive).
   enabled_ = (std::strcmp(val, "1") == 0 || std::strcmp(val, "true") == 0 ||
               std::strcmp(val, "yes") == 0 || std::strcmp(val, "on") == 0);
 }
@@ -128,6 +128,23 @@ void DebugLog::knxd_recv(std::string_view operation, std::string_view address,
     oss << " data=" << data;
   }
   oss << "\n";
+  std::cerr << oss.str() << std::flush;
+}
+
+void DebugLog::log(Level level, std::string_view message) {
+  const char* name = "INFO";
+  if (level == Level::Error) {
+    name = "ERROR";
+  } else if (level == Level::Warn) {
+    name = "WARN";
+  }
+
+  // Build the complete line first: stderr is shared by every worker process
+  // and a single write keeps the fields from interleaving.
+  std::ostringstream oss;
+  oss << "[" << name << "] ";
+  write_timestamp(oss);
+  oss << message << "\n";
   std::cerr << oss.str() << std::flush;
 }
 

@@ -197,8 +197,13 @@ actual file content (e.g., `#pragma once` or `#include`).
    seconds — without multiple workers, one long-poll would block all other
    clients. Worker count is configurable via `FCGI_WORKERS` (default: 20).
    Workers never open a bus connection of their own (see decision 2).
-   All shared state (SharedGroupCache, SharedTxQueue, SessionStore) is
-   protected by process-shared mutexes for safe access across processes.
+   All shared state (SharedGroupCache, SharedTxQueue, SessionStore) lives in
+   `mmap(MAP_SHARED|MAP_ANONYMOUS)` memory created **before the first fork**
+   and is protected by process-shared robust mutexes.  This is not optional:
+   a client logs in once and then sends `s=<id>` with requests that any worker
+   may serve, so a session store that is merely a copied member of `main()`
+   answers 401 in every worker but one (that was a real bug, verified 15/15
+   with `FCGI_WORKERS=4`).
    **The parent supervises the pool and is the only process that reaps
    children** (no SIGCHLD handler that calls `waitpid()` — it would steal the
    exit statuses).  Dead workers and a dead cache reader are restarted with a
@@ -224,7 +229,19 @@ actual file content (e.g., `#pragma once` or `#include`).
    - **knxd** (`KnxdClient`): one read-write group socket, opened by the cache
      reader.  Every `EIB_OPEN_GROUPCON` reply is read with a deadline
      (`set_handshake_timeout_ms()`, default 5 s) — a knxd that accepts the
-     connection but never answers must not block the caller.
+     connection but never answers must not block the caller.  The client never
+     sleeps and never reconnects inside `send_group_packet()` /
+     `poll_group_telegram()`: it reports the failure (and drops the socket, so
+     `is_connected()` becomes false) and the cache reader — the single
+     reconnect authority — retries with backoff.  The 50 ms interval that
+     protects knxd's IP tunnel is declared as `min_send_interval_ms()` and
+     applied by the reader as a *wait between sends*, so reception is never
+     blocked.
+   - **Sender validation**: a transport must not trust unicast datagrams.  The
+     tunnel socket is `connect()`ed to the configured device (the kernel filters
+     by peer) and only frames carrying *our* channel count as liveness; the
+     routing socket verifies every datagram's destination address with
+     `IP_PKTINFO` against the configured group.
    - **ip-routing** (`RoutingBusLink`): one UDP socket, joined to
      `KNX_IP_MULTICAST`, TTL 16, loop enabled.  Stateless: no ACKs, no
      heartbeat, no outage detection (a disappeared router is undetectable —
@@ -256,11 +273,17 @@ actual file content (e.g., `#pragma once` or `#include`).
      CRI structure length (`0x04` as `body[size-16]`); a `TUNNELLING_ACK` is
      four bytes (structure length, channel, sequence, status), the request five
      (its reserved byte before the cEMI).
-   - **cEMI trap**: only `L_Data.ind` (0x29) reaches the cache.  `L_Data.con`
-     (0x2E) confirms *our own* write and must be dropped, otherwise every
-     write is delivered twice.  `L_Data.req` is what a tunnelling client sends
-     (and what a device confirms with `.con`); a routing participant sends
-     `.ind`.
+   - **cEMI trap**: only `L_Data.ind` (0x29) with a **group** destination
+     reaches the cache.  `L_Data.con` (0x2E) confirms *our own* write and must
+     be dropped, otherwise every write is delivered twice.  `L_Data.req` is
+     what a tunnelling client sends (and what a device confirms with `.con`);
+     a routing participant sends `.ind`.  The parser rejects every other
+     message code (bus monitor, raw frame, property access, reset, polling)
+     **before it computes any offset**, because those layouts are different and
+     a shared header makes it easy to read a foreign frame as a group value.
+     A non-empty additional-info block is legal and must be skipped: all
+     following fields are relative to its end, and both the standard and the
+     extended frame format use that same cEMI layout.
    - **Outage key**: `/r` and `/w` report `"knxd": {...}` for the knxd
      transport and `"bus": {...}` for the KNXnet/IP transports — same inner
      shape, key from `BusConfig::outage_key()`.
@@ -269,11 +292,24 @@ actual file content (e.g., `#pragma once` or `#include`).
      is unavailable — `SharedTxBusLink` returns `false`, `/w` answers `503`
      instead of pretending success.
 
-3. **Shared-memory group cache (`SharedGroupCache`)**: A fixed-size
-   open-addressing hash table (2048 entries) in `mmap(MAP_SHARED|MAP_ANONYMOUS)`
-   memory, accessible by all worker processes.  Each entry stores the KNX group
-   address, APDU value data (up to 14 bytes), a Unix timestamp, and the
-   `pushed_at` position.  Synchronization:
+3. **Shared-memory group cache (`SharedGroupCache`)**: A chained hash table in
+   `mmap(MAP_SHARED|MAP_ANONYMOUS)` memory, accessible by all worker processes.
+   Each entry stores the KNX group address, APDU value data (up to 14 bytes), a
+   Unix timestamp, the `pushed_at` position and the intrusive LRU links.  The
+   region is `SharedCacheData` + `capacity` bucket heads + `capacity` entry
+   slots; `capacity` comes from `KNX_CACHE_CAPACITY` (default **16384**, ~700
+   KiB) and is fixed before `fork()`.
+   - **The cache holds the most recently pushed `capacity` distinct addresses.**
+     A push of a new address when the table is full evicts the least recently
+     *pushed* one (O(1) via the LRU list), so a busy installation keeps its
+     active addresses instead of dropping every new one after 2048 (which is
+     what the old fixed table did).  Reading does *not* refresh recency — the
+     order is "last telegram", not "last client poll".
+   - Group address 0 is a normal address: occupancy is defined by the bucket
+     chains, not by a `0` sentinel.
+   - Timestamp comparisons are signed, so a backwards clock step cannot make an
+     entry look infinitely old.
+   Synchronization:
    - `pthread_mutex_t` with `PTHREAD_PROCESS_SHARED` and `PTHREAD_MUTEX_ROBUST`
      protects all read/write access to cache entries.
    - `pthread_cond_t` with `PTHREAD_PROCESS_SHARED` and `CLOCK_MONOTONIC`
@@ -282,15 +318,27 @@ actual file content (e.g., `#pragma once` or `#include`).
      increasing across all workers.  The single source of truth for the `i`
      field in `/r` responses.
    - `std::atomic<uint32_t> generation` — incremented on each push, used by
-     `wait_for_new_data()` for efficient change detection.
+     `wait_for_new_data()` for efficient change detection.  It sits on its own
+     cache line (`alignas(64)`), away from `position`, which the reader writes
+     on every telegram.
+   - `wait_for_new_data(0)` is a non-blocking "nothing can arrive in zero
+     time" and always reports `false`; blocking callers pass a positive
+     timeout.
 
 4. **Long-poll**: For `/r` requests, the ReadHandler blocks on the shared
-   condition variable via `pthread_cond_timedwait()` instead of polling a knxd
+   condition variable via `pthread_cond_timedwait()` instead of polling a bus
    socket fd.  When the cache reader pushes new data, it broadcasts the
    condition variable — all blocked workers wake immediately (microsecond
    latency) and call `get_delta()` to find matching entries.  Zero CPU while
    waiting.  The `wait_for_new_data()` method handles spurious wakeups and
    robust-mutex recovery (EOWNERDEAD).
+
+   **No request waits longer than 330 s** (`kMaxClientWaitSec`, a little above
+   the client's own 300 s long-poll re-create, so backend and client do not
+   fight over every reconnect).  `LONGPOLL_TIMEOUT_SEC` is capped at the same
+   value and a client supplied `t` is clamped by `clamp_client_wait()` — an
+   unbounded `t` would let one request pin a worker for years.  Sessions are
+   *not* affected: they live for `SESSION_TTL_SEC` (default 30 min).
 
    Only `/r` takes a load-shedding/concurrency token; `/w` and `/l` never do,
    because a spurious 503 on a write surfaces in CometVisu as a failed switch
@@ -369,6 +417,23 @@ actual file content (e.g., `#pragma once` or `#include`).
    caught up yet.  Without this the client cannot distinguish "bus is quiet"
    from "connection lost" and shows frozen values forever.
 
+10. **Sessions are shared memory, not process state**: `SessionStore` owns a
+    fixed-size slot array in `mmap(MAP_SHARED|MAP_ANONYMOUS)` memory, created
+    in the parent before `fork()` (`SESSION_MAX` slots, default 10000 ≈ 300
+    KiB; `SESSION_TTL_SEC`, default 1800).  Every public method takes the
+    process-shared robust mutex — there is no unlocked public mutator
+    (`count()` and `cleanup_expired()` included).
+    - A session id is 16 hex characters from a per-process-seeded
+      `mt19937_64`; a collision is detected against the store and the id
+      regenerated.
+    - When the table is full the **oldest** session (by creation sequence, not
+      by wall clock — several logins within one second must still evict in
+      order) is evicted.  A client that logs in again therefore always finds
+      room, and no existing client is ever told "no".
+    - The anonymous session `"0"` is always valid and never occupies a slot.
+    - **Authentication is a known, accepted limitation**: `u`/`p` are not
+      validated (the backend must sit behind the web server's auth).
+
 ## Knxd Protocol Details
 
 The eibd client protocol over Unix socket:
@@ -397,17 +462,30 @@ KNX three-level address `X/Y/Z` → 16-bit:
 uint16_t addr = (X << 11) | (Y << 8) | Z;
 ```
 
-### APDU for Group Value Write
+### APDU for group values (KNX 03_07_03)
+The APDU starts with two octets that carry TPCI and APCI:
+
 ```
-byte 0: 0x00
-byte 1: 0x80 | (first_data_byte & 0x3F)   // 0x80 = write, 0x40 = response, 0x00 = read
-bytes 2..N: remaining data bytes
+octet 1: [7..6] TPCI type | [5..2] TPCI | [1..0] APCI high bits
+octet 2: [7..6] APCI low bits | [5..0] value (only for values <= 6 bits)
 ```
 
-For multi-byte values (e.g., DPT 9.001 temperature: 2 bytes):
+The APCI is therefore `(octet1 & 0x03) << 2 | (octet2 >> 6)`:
+`0x0` = A_GroupValue_Read, `0x1` = A_GroupValue_Response, `0x2` =
+A_GroupValue_Write.  Everything else (connection-oriented TPCI, individual
+address services, the reserved patterns) is **not** a group value and must be
+rejected — `parse_apdu()` does exactly that and returns `std::optional<Apdu>`.
+
+A value that fits into 6 bits travels inside octet 2; a longer one starts at
+octet 3:
+
 ```
-0x00 0x80 0x0c 0x6f   → A_GroupValue_Write, data=0c6f
+0x00 0x80 0x2a        → A_GroupValue_Write, data=2a        (6-bit packing)
+0x00 0x80 0x0c 0x6f   → A_GroupValue_Write, data=0c6f      (DPT 9.001)
 ```
+
+A 1-byte value above `0x3F` must use the multi-octet form (`0x00 0x80 0x42`),
+which is what `WriteHandler` produces and what every device expects.
 
 ### Group Socket Open (EIB_OPEN_GROUPCON)
 ```
@@ -436,14 +514,21 @@ payload structure is the same (src_pa + dst_ga + apdu).
 
 ## APDU Decoding
 
-Given APDU bytes `[b0, b1, b2, ...]`:
-- `b0` = always 0x00 for group value
-- `b1 & 0xC0` = APCI (Application Layer Protocol Control Information):
-  - `0x00` = A_GroupValue_Read
-  - `0x40` = A_GroupValue_Response
-  - `0x80` = A_GroupValue_Write
-- For 1-byte values: `b1 & 0x3F` is the value
-- For multi-byte values: `b2, b3, ...` are the remaining data bytes
+`parse_apdu()` (`src/knxd/knxd_protocol.cpp`) is the single implementation,
+shared by every transport:
+
+- `b0` carries the TPCI *type* in bits 7..6 and the APCI **high** bits in
+  bits 1..0.  A group value always travels in a data packet, so
+  `(b0 & 0xC0) != 0` is rejected.
+- The APCI is 4 bits wide: `((b0 & 0x03) << 2) | (b1 >> 6)`.
+  `0x2` = A_GroupValue_Write, `0x1` = A_GroupValue_Response,
+  `0x0` = A_GroupValue_Read.  Every other value is refused — there is no
+  "unknown but successful" result, because a caller must never mistake a
+  management frame for a group value.
+- For a 2-octet APDU the value is `b1 & 0x3F` (≤ 6 bits); otherwise the
+  payload is `b2, b3, ...` (`std::optional<Apdu>` with `Apdu::data`).
+- The result is a value: `parse_apdu(std::span<const uint8_t>)`, not an
+  out-parameter triple.
 
 ## Hex Encoding for CometVisu
 
@@ -456,8 +541,12 @@ KNX data values are transmitted as hex strings in CometVisu JSON:
 
 For unit tests of the shared cache, use `SharedGroupCache::create()` which
 allocates a real mmap'd region — this works fine in single-process tests.
-For multi-instance tests (simulating multiple workers), use `attach()` to
-share the same underlying `SharedCacheData` pointer.
+Pass a small capacity (`create(4)`) to exercise LRU eviction without pushing
+thousands of telegrams.  For multi-instance tests (simulating multiple
+workers), use `attach()` to share the same underlying `SharedCacheData`
+pointer; the same applies to `SessionStore` (and a plain `fork()` test proves
+that a child sees the parent's session — the regression test for "sessions are
+per worker").
 
 For integration tests of the ReadHandler, push test data directly to the
 shared cache via `cache_.push()` before calling `handle()`.  For poll-loop
@@ -547,4 +636,9 @@ Use simple stderr-based logging with levels:
 - `INFO`: Normal operational messages
 - `DEBUG`: Detailed diagnostics
 
-Format: `[LEVEL] [timestamp] message`
+Format: `[LEVEL] [timestamp] message` — `DebugLog::log(Level, std::string_view)`
+implements it (one `std::cerr` write per line, so lines from different worker
+processes never interleave).  `DebugLog::http_request()` / `knxd_send()` /
+`knxd_recv()` are the `DEBUG_BACKEND=1` traces; operational messages are always
+written.  Never `std::cout` for a diagnostic: stdout carries the startup
+banner only.

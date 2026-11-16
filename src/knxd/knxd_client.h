@@ -19,11 +19,8 @@
  *
  * Opens one group socket to knxd for sending group telegrams
  * (EIB_GROUP_PACKET) and receiving APDU_PACKET telegrams from the
- * KNX bus.  No cache connection — GroupCache handles all data storage
- * and position tracking locally.
- *
- * The abstract BusLink exists solely for test mocking
- * via MockBusLink.
+ * KNX bus.  The cache reader is the only user; it owns the connection and is
+ * also the only place that reconnects.
  */
 
 #pragma once
@@ -59,11 +56,15 @@ public:
   [[nodiscard]] bool connect(std::string_view socket_path);
 
   void disconnect() override;
-  [[nodiscard]] bool reconnect();
   [[nodiscard]] bool is_connected() const override;
   [[nodiscard]] bool open_group_socket(bool write_only);
   [[nodiscard]] bool send_group_packet(uint16_t group_addr,
                                        const std::vector<uint8_t>& apdu) override;
+
+  /// knxd's IP tunnel drops telegrams that follow each other faster than
+  /// ~50 ms.  The cache reader applies the interval by waiting between sends;
+  /// this class never sleeps in the receive path.
+  [[nodiscard]] int min_send_interval_ms() const override { return 50; }
   [[nodiscard]] bool poll_group_telegram(uint16_t& out_group_addr,
                                          std::vector<uint8_t>& out_apdu) override;
   [[nodiscard]] int get_fd() const override;

@@ -20,40 +20,54 @@
 
 #include "bus/bus_connector.h"
 
-#include <unistd.h>
+#include <time.h>
 
 #include <array>
+#include <cstddef>
 #include <iostream>
 
 namespace cvknx {
+namespace {
 
-bool connect_bus_with_retry(BusLink& link, bool has_worked_before, const int* custom_delays_ms) {
-  // Retry delays in milliseconds applied BETWEEN attempts.
-  // Standard (has_worked_before=false): 500ms, 1s, 2s  → 4 attempts total
-  // Extended (has_worked_before=true):  500ms, 1s, 2s, 4s, 8s → 6 attempts total
-  constexpr std::array<int, 5> default_delays_ms = {500, 1000, 2000, 4000, 8000};
-  const int* delays_ms = custom_delays_ms != nullptr ? custom_delays_ms : default_delays_ms.data();
-  const int num_retries = has_worked_before ? 5 : 3;
-  const int total_attempts = num_retries + 1;
+/// Sleep for @p delay_ms milliseconds (no obsolete usleep()).
+void sleep_ms(int delay_ms) {
+  if (delay_ms <= 0) {
+    return;
+  }
+  struct timespec request {};
+  request.tv_sec = delay_ms / 1000;
+  request.tv_nsec = static_cast<long>(delay_ms % 1000) * 1000000L;
+  (void)::nanosleep(&request, nullptr);
+}
 
-  for (int attempt = 1; attempt <= total_attempts; ++attempt) {
+}  // namespace
+
+bool connect_bus_with_retry(BusLink& link, std::span<const int> delays_ms) {
+  static constexpr std::array<int, 5> kDefaultDelaysMs = {500, 1000, 2000, 4000, 8000};
+  const std::span<const int> delays =
+      delays_ms.empty() ? std::span<const int>{kDefaultDelaysMs} : delays_ms;
+
+  const std::size_t total_attempts = delays.size() + 1;
+  for (std::size_t attempt = 1; attempt <= total_attempts; ++attempt) {
     if (link.connect()) {
       if (attempt > 1) {
         std::cout << "[INFO] Bus connection to " << link.label() << " succeeded after " << attempt
                   << " attempts\n";
+        std::cout << std::flush;
       }
       return true;
     }
     if (attempt < total_attempts) {
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-      const int delay = delays_ms[attempt - 1];
+      const int delay = delays[attempt - 1];
       std::cerr << "[WARN] Bus connection attempt " << attempt << "/" << total_attempts
                 << " failed, retrying in " << delay << "ms...\n";
-      ::usleep(static_cast<useconds_t>(delay) * 1000);
+      std::cerr << std::flush;
+      sleep_ms(delay);
     }
   }
 
   std::cerr << "[ERROR] Bus connection failed after " << total_attempts << " attempts, giving up\n";
+  std::cerr << std::flush;
   return false;
 }
 

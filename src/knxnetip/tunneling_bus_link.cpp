@@ -36,6 +36,7 @@
 
 #include "knxnetip/cemi.h"
 #include "knxnetip/knxnetip_frame.h"
+#include "util/debug_log.h"
 
 namespace cvknx {
 namespace {
@@ -74,21 +75,15 @@ TunnelingBusLink::~TunnelingBusLink() {
   disconnect();
 }
 
+/// Send a datagram to the configured device.  The socket is *connected* to
+/// the device in connect(), so the kernel already rejects datagrams from any
+/// other source — a stray packet from another host can never be mistaken for
+/// a device response.
 bool TunnelingBusLink::send_to_device(const std::vector<std::uint8_t>& datagram) {
   if (fd_ < 0) {   // GCOV_EXCL_BR_LINE - disconnect() only calls this when connected
     return false;  // GCOV_EXCL_LINE
   }
-  const auto host = knxnetip::ipv4_from_string(options_.host);
-  if (!host) {     // GCOV_EXCL_BR_LINE - connect() validated the host
-    return false;  // GCOV_EXCL_LINE
-  }
-  struct sockaddr_in destination {};
-  destination.sin_family = AF_INET;
-  destination.sin_addr.s_addr = htonl(*host);
-  destination.sin_port = htons(options_.port);
-  return ::sendto(fd_, datagram.data(), datagram.size(), 0,
-                  reinterpret_cast<const struct sockaddr*>(&destination),
-                  sizeof(destination)) == static_cast<ssize_t>(datagram.size());
+  return ::send(fd_, datagram.data(), datagram.size(), 0) == static_cast<ssize_t>(datagram.size());
 }
 
 bool TunnelingBusLink::connect() {
@@ -131,6 +126,22 @@ bool TunnelingBusLink::connect() {
   if (::getsockname(fd_, bound_ptr, &bound_len) == 0) {  // GCOV_EXCL_BR_LINE
     bound_port = ntohs(bound.sin_port);
   }
+
+  // Connect the UDP socket: after this the kernel only delivers datagrams from
+  // the configured device, and send() needs no destination.
+  struct sockaddr_in device {};
+  device.sin_family = AF_INET;
+  device.sin_addr.s_addr = htonl(*host);
+  device.sin_port = htons(options_.port);
+  // GCOV_EXCL_START - connect() on a UDP socket only fails with a broken
+  // socket or a routing table that cannot be injected from a test
+  if (::connect(fd_, reinterpret_cast<struct sockaddr*>(&device), sizeof(device)) != 0) {
+    std::cerr << "[ERROR] Cannot connect KNXnet/IP tunnel socket to " << label() << ": "
+              << std::strerror(errno) << "\n";
+    disconnect();
+    return false;
+  }
+  // GCOV_EXCL_STOP
   set_nonblocking(true);
 
   // In NAT mode the HPAI must be 0.0.0.0:0 so the device answers to the source
@@ -221,10 +232,6 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
   if (!is_connected()) {
     return false;  // also covers fd_ < 0: connect() is what opens it
   }
-  const auto host = knxnetip::ipv4_from_string(options_.host);
-  if (!host) {     // GCOV_EXCL_BR_LINE - connect() validated the host
-    return false;  // GCOV_EXCL_LINE
-  }
 
   const auto cemi = cemi::encode_group_request(crd_address_, group_addr, apdu);
   if (cemi.empty()) {
@@ -299,8 +306,6 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
   if (!frame) {
     return;  // unknown service types are ignored
   }
-  // Any frame from the device proves that it is alive.
-  state_pending_ = false;
 
   switch (frame->service) {
     case knxnetip::ServiceType::TunnellingRequest: {
@@ -316,6 +321,8 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
       if (request->channel != channel_) {
         return;
       }
+      // A frame on *our* channel proves the device is alive.
+      state_pending_ = false;
 
       bool expected = true;
       if (rx_has_expected_) {
@@ -348,6 +355,7 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
       if (ack->channel != channel_) {
         return;
       }
+      state_pending_ = false;
       if (ack->sequence == ack_wait_sequence_) {
         ack_received_ = true;
       }
@@ -363,6 +371,7 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
       if (response->channel != channel_) {
         return;
       }
+      state_pending_ = false;
       if (response->status != 0x00) {
         std::cerr << "[WARN] " << label() << " reported connection state error "
                   << static_cast<int>(response->status) << " — reconnecting\n";
@@ -414,10 +423,6 @@ void TunnelingBusLink::send_heartbeat_if_due() {
   if (current < heartbeat_due_ms_) {
     return;
   }
-  const auto host_unused = knxnetip::ipv4_from_string(options_.host);
-  if (!host_unused) {  // GCOV_EXCL_BR_LINE - connect() validated the host
-    return;            // GCOV_EXCL_LINE
-  }
   const knxnetip::Hpai hpai{0U, 0U};
   (void)send_to_device(knxnetip::build_connectionstate_request(channel_, hpai));
 
@@ -434,25 +439,24 @@ void TunnelingBusLink::maintain() {
   if (fd_ < 0 || lost_) {
     return;
   }
-  if (heartbeat_expired()) {
-    std::cerr << "[WARN] " << label() << ": no CONNECTIONSTATE_RESPONSE — reconnecting\n";
+  if (heartbeat_overdue()) {
+    // The device did not answer the CONNECTIONSTATE_REQUEST: the tunnel is
+    // gone even though the socket still looks fine.
+    lost_ = true;
+    DebugLog::log(DebugLog::Level::Warn, label() + ": no CONNECTIONSTATE_RESPONSE — reconnecting");
     return;
   }
   send_heartbeat_if_due();
 }
 
-bool TunnelingBusLink::heartbeat_expired() {
+bool TunnelingBusLink::heartbeat_overdue() const {
   /// Timer granularity: a poll that returned at the deadline can be a moment
   /// early, so expiry allows a couple of milliseconds of slack.
   constexpr std::int64_t kExpirySlackMs = 2;
   if (!state_pending_) {
     return false;
   }
-  if (now_ms() + kExpirySlackMs < state_deadline_ms_) {
-    return false;
-  }
-  lost_ = true;
-  return true;
+  return now_ms() + kExpirySlackMs >= state_deadline_ms_;
 }
 
 BusLink::WaitResult TunnelingBusLink::wait_for_activity(int timeout_ms) {

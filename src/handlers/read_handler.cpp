@@ -28,6 +28,7 @@
 
 #include "read_handler.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -36,9 +37,9 @@
 #include <string>
 #include <vector>
 
-#include "knxd/knxd_client.h"
-#include "knxd/knxd_protocol.h"
+#include "bus/bus_link.h"
 #include "bus_status_json.h"
+#include "knxd/knxd_protocol.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
 #include "util/hex.h"
@@ -47,12 +48,16 @@
 
 namespace cvknx {
 
+int clamp_client_wait(int requested_sec) {
+  return requested_sec > kMaxClientWaitSec ? kMaxClientWaitSec : requested_sec;
+}
+
 ReadHandler::ReadHandler(SharedGroupCache& cache, BusLink& knxd, SessionStore& sessions,
                          int longpoll_timeout_sec, std::string outage_key)
     : cache_(cache),
       knxd_(knxd),
       sessions_(sessions),
-      longpoll_timeout_sec_(longpoll_timeout_sec),
+      longpoll_timeout_sec_(std::clamp(longpoll_timeout_sec, 1, kMaxClientWaitSec)),
       outage_key_(std::move(outage_key)) {}
 
 std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
@@ -114,7 +119,9 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     }
     t_provided = true;
     t_original = *parsed;
-    timeout_sec = *parsed;
+    // No request may wait longer than the hard limit: a client could
+    // otherwise pin a worker for years (the value *is* the wait).
+    timeout_sec = clamp_client_wait(*parsed);
   }
 
   // Age filter: only active when t > 0 (spec: "maximal TIMEOUT Sekunden alt").

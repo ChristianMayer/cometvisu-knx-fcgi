@@ -24,28 +24,25 @@
 
 #pragma once
 
+#include <span>
+
 #include "bus/bus_link.h"
 
 namespace cvknx {
 
 /// Connect to the bus with exponential backoff retry.
-/// Attempts to connect immediately, then retries on failure with increasing delays.
 ///
-/// Standard retry (has_worked_before=false):
-///   try -> wait 500ms -> try -> wait 1s -> try -> wait 2s -> try  (4 attempts total)
+/// The number of attempts is `1 + number of delays`, so a caller controls the
+/// worst-case delay by the span it passes — an out-of-bounds read is
+/// impossible by construction.
 ///
-/// Extended retry (has_worked_before=true):
+/// Default delays (empty span):
 ///   try -> wait 500ms -> try -> wait 1s -> try -> wait 2s -> try
-///   -> wait 4s -> try -> wait 8s -> try  (6 attempts total)
+///   -> wait 4s -> try -> wait 8s -> try   (6 attempts, one per delay)
 ///
 /// @param link The bus link to connect.
-/// @param has_worked_before If true, use extended retry delays (up to 8s).
-/// @param custom_delays_ms Optional array of retry delays in milliseconds.
-///        When nullptr (default), uses built-in defaults:
-///        {500, 1000, 2000, 4000, 8000}.
-///        Must have at least 5 elements when provided.
-/// @return true if connection succeeded.
-[[nodiscard]] bool connect_bus_with_retry(BusLink& link, bool has_worked_before,
-                                          const int* custom_delays_ms = nullptr);
+/// @param delays_ms Explicit retry delays, one per retry.
+/// @return true if a connection attempt succeeded.
+[[nodiscard]] bool connect_bus_with_retry(BusLink& link, std::span<const int> delays_ms = {});
 
 }  // namespace cvknx

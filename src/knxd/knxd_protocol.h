@@ -36,6 +36,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -110,25 +111,46 @@ private:
 };
 
 /**
- * @brief APDU types for group communication (Application Layer).
+ * @brief APCI service of a group communication APDU (KNX 03_07_03).
  *
- * The APCI (Application Protocol Control Information) is encoded in bits 7-6
- * of the second APDU byte.  The remaining 6 bits carry the value for 1-byte
- * data points.
+ * The APDU starts with two octets that carry the TPCI and the APCI:
+ *
+ * @code
+ *  octet 1: [7..6] TPCI type | [5..2] TPCI | [1..0] APCI high
+ *  octet 2: [7..6] APCI low   | [5..0] value (for <= 6 bit data)
+ * @endcode
+ *
+ * The values below are the **APCI values**, i.e. `(octet1 & 0x03) << 2 |
+ * (octet2 >> 6)`, not the bit masks of octet 2.
  */
 enum class ApduType : uint8_t {
-  Read = 0x00,      // A_GroupValue_Read
-  Response = 0x40,  // A_GroupValue_Response
-  Write = 0x80,     // A_GroupValue_Write
+  Read = 0x0,      // A_GroupValue_Read
+  Response = 0x1,  // A_GroupValue_Response
+  Write = 0x2,     // A_GroupValue_Write
+};
+
+/// A parsed group-value APDU.
+struct Apdu {
+  ApduType type = ApduType::Write;
+  /// Payload bytes.  Empty for A_GroupValue_Read.
+  std::vector<uint8_t> data;
 };
 
 /// Parse a received APDU.
-/// @param apdu Raw APDU bytes (starting with the 2-byte APDU header).
-/// @param out_type Output: the APCI type.
-/// @param out_data Output: the payload bytes.
-/// @return true if parsing succeeded.
-[[nodiscard]] bool parse_apdu(const std::vector<uint8_t>& apdu, ApduType& out_type,
-                              std::vector<uint8_t>& out_data);
+///
+/// Accepts only the three group-value services carried by a data transport
+/// packet (TPCI type `00`).  Everything else — connection-oriented TPCI,
+/// individual-address services (device descriptor, memory, ...), the reserved
+/// APCI patterns and truncated frames — is rejected, so a caller can never
+/// mistake a management frame for a group value.
+///
+/// A value that fits into 6 bits is packed into the second APDU octet; a
+/// longer value follows from octet 3 onwards.  That is the standard encoding
+/// (and what knxd, Calimero and every device use).
+///
+/// @param apdu Raw APDU bytes (two header octets plus optional data).
+/// @return the parsed APDU, or std::nullopt when it is not a group value.
+[[nodiscard]] std::optional<Apdu> parse_apdu(std::span<const uint8_t> apdu);
 
 #ifdef KNX_WITH_KNXD_TRANSPORT
 /**

@@ -13,113 +13,236 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * @file shared_group_cache.cpp
+ * @brief Shared-memory group cache: push, delta queries, LRU eviction.
+ */
+
 #include "shared_group_cache.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <new>
 
 namespace cvknx {
+namespace {
+
+/// Bucket heads follow the SharedCacheData header.
+int32_t* bucket_array(SharedCacheData* data) {
+  return reinterpret_cast<int32_t*>(data + 1);
+}
+
+/// Entry slots follow the bucket heads.
+SharedCacheEntry* entry_array(SharedCacheData* data) {
+  return reinterpret_cast<SharedCacheEntry*>(bucket_array(data) + data->capacity);
+}
+
+/// Hash bucket of a group address (capacity is not a power of two).
+std::size_t bucket_index(const SharedCacheData* data, uint16_t addr) {
+  return static_cast<std::size_t>(addr) % data->capacity;
+}
+
+/// Clamp an environment/user supplied capacity into the supported range.
+std::size_t clamp_capacity(std::size_t capacity) {
+  return std::clamp(capacity, kMinCacheCapacity, kMaxCacheCapacity);
+}
+
+/// Lock helper for the process-shared, robust cache mutex.
+///
+/// Recovers from a previous owner that died while holding the lock
+/// (EOWNERDEAD).  `acquired()` is false only for an unrecoverable error, and
+/// the destructor then leaves the mutex alone.
+class CacheLock {
+public:
+  explicit CacheLock(pthread_mutex_t& mutex) : mutex_(mutex) {
+    const int rc = ::pthread_mutex_lock(&mutex_);
+    owned_ = (rc == 0);
+    if (rc == EOWNERDEAD) {
+      // Previous owner died while holding the lock — make it consistent.
+      ::pthread_mutex_consistent(&mutex_);
+      owned_ = true;
+    }
+  }
+  ~CacheLock() {
+    if (owned_) {  // GCOV_EXCL_BR_LINE - a failed lock needs an invalid mutex
+      ::pthread_mutex_unlock(&mutex_);
+    }
+  }
+  CacheLock(const CacheLock&) = delete;
+  CacheLock& operator=(const CacheLock&) = delete;
+  CacheLock(CacheLock&&) = delete;
+  CacheLock& operator=(CacheLock&&) = delete;
+
+  [[nodiscard]] bool acquired() const { return owned_; }
+
+private:
+  pthread_mutex_t& mutex_;
+  bool owned_ = false;
+};
+
+}  // namespace
+
+std::size_t shared_cache_region_size(std::size_t capacity) {
+  return sizeof(SharedCacheData) +
+         clamp_capacity(capacity) * (sizeof(int32_t) + sizeof(SharedCacheEntry));
+}
 
 SharedGroupCache::~SharedGroupCache() {
+  // Only the owner unmaps.  The process-shared mutex and condition variable
+  // are deliberately *not* destroyed: a worker that unwinds normally must not
+  // tear down the synchronization objects the whole pool uses, and the kernel
+  // reclaims the anonymous mapping when the last process exits.
   if (data_ != nullptr && owns_mmap_) {
-    ::munmap(data_, sizeof(SharedCacheData));
+    ::munmap(data_, bytes_);
     data_ = nullptr;
     owns_mmap_ = false;
+    bytes_ = 0;
   }
 }
 
-bool SharedGroupCache::create() {
+bool SharedGroupCache::create(std::size_t capacity) {
   if (data_ != nullptr) {
     return false;  // already created
   }
 
-  void* region = ::mmap(nullptr, sizeof(SharedCacheData), PROT_READ | PROT_WRITE,
-                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  const std::size_t slots = clamp_capacity(capacity);
+  const std::size_t bytes = shared_cache_region_size(slots);
+
+  void* region = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   // GCOV_EXCL_START - mmap() only fails on address-space exhaustion
   if (region == MAP_FAILED) {
     return false;
   }
   // GCOV_EXCL_STOP
 
-  // Placement-new the SharedCacheData to initialize all fields to zero.
+  // Placement-new the header to initialize all fields to zero.
   auto* d = new (region) SharedCacheData{};
+  d->capacity = static_cast<uint32_t>(slots);
 
-  // Initialize the process-shared mutex.
+  // Initialize the process-shared, robust mutex.
   ::pthread_mutexattr_t mutex_attr;
   ::pthread_mutexattr_init(&mutex_attr);
   ::pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-  // Use robust mutex so that if the cache reader crashes while holding
-  // the lock, other processes can recover (EOWNERDEAD).
+  // Robust: if a process crashes while holding the lock, the others can
+  // recover (EOWNERDEAD) instead of deadlocking forever.
   ::pthread_mutexattr_setrobust(&mutex_attr, PTHREAD_MUTEX_ROBUST);
   // GCOV_EXCL_START - pthread_mutex_init() only fails on resource exhaustion
   if (::pthread_mutex_init(&d->mutex, &mutex_attr) != 0) {
     ::pthread_mutexattr_destroy(&mutex_attr);
-    ::munmap(region, sizeof(SharedCacheData));
+    ::munmap(region, bytes);
     return false;
   }
   // GCOV_EXCL_STOP
   ::pthread_mutexattr_destroy(&mutex_attr);
 
-  // Initialize the process-shared condition variable.
+  // Initialize the process-shared condition variable (monotonic clock).
   ::pthread_condattr_t cond_attr;
   ::pthread_condattr_init(&cond_attr);
   ::pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-  // Use monotonic clock for timeout calculations.
   ::pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
   // GCOV_EXCL_START - pthread_cond_init() only fails on resource exhaustion
   if (::pthread_cond_init(&d->cond, &cond_attr) != 0) {
     ::pthread_condattr_destroy(&cond_attr);
     ::pthread_mutex_destroy(&d->mutex);
-    ::munmap(region, sizeof(SharedCacheData));
+    ::munmap(region, bytes);
     return false;
   }
   // GCOV_EXCL_STOP
   ::pthread_condattr_destroy(&cond_attr);
 
+  // Bucket heads: -1 = empty chain.
+  int32_t* buckets = bucket_array(d);
+  std::fill(buckets, buckets + slots, -1);
+
   data_ = d;
   owns_mmap_ = true;
+  bytes_ = bytes;
   return true;
 }
 
 void SharedGroupCache::attach(SharedCacheData* data) {
   data_ = data;
   owns_mmap_ = false;
+  bytes_ = 0;
 }
 
-// ---- Internal helpers ----
+// ---- Internal helpers (caller holds the mutex) ----
 
-size_t SharedGroupCache::find_slot(uint16_t addr) const {
-  // GCOV_EXCL_START - find_slot() is only called after a null check by the
-  // caller; the guard keeps the helper safe on its own.
-  if (data_ == nullptr) {
-    return kSharedCacheCapacity;
-  }
-  // GCOV_EXCL_STOP
-  // Simple open addressing with linear probing.
-  size_t index = static_cast<size_t>(addr) % kSharedCacheCapacity;
-  for (size_t i = 0; i < kSharedCacheCapacity; ++i) {
-    size_t slot = (index + i) % kSharedCacheCapacity;
-    if (data_->entries[slot].addr == addr || data_->entries[slot].addr == 0) {
-      return slot;
+int32_t SharedGroupCache::find_locked(uint16_t addr) const {
+  int32_t index = bucket_array(data_)[bucket_index(data_, addr)];
+  const SharedCacheEntry* entries = entry_array(data_);
+  // A chain is terminated by -1 and every index is in range, so this loop is
+  // bounded by the number of entries.
+  while (index >= 0) {
+    const SharedCacheEntry& entry = entries[index];
+    if (entry.addr == addr) {
+      return index;
     }
+    index = entry.hash_next;
   }
-  return kSharedCacheCapacity;  // table full
+  return -1;
 }
 
-void SharedGroupCache::insert_locked(uint16_t addr, const SharedCacheEntry& entry) {
-  size_t slot = find_slot(addr);
-  if (slot >= kSharedCacheCapacity) {
-    return;  // table full — drop entry
+int32_t SharedGroupCache::allocate_locked() {
+  if (data_->num_entries < data_->capacity) {
+    return static_cast<int32_t>(data_->num_entries++);
   }
+  // Table full: recycle the least recently pushed address.
+  const int32_t victim = data_->lru_tail;
+  unlink_bucket_locked(victim);
+  unlink_lru_locked(victim);
+  ++data_->evictions;
+  return victim;
+}
 
-  bool is_new = (data_->entries[slot].addr == 0);
-  data_->entries[slot] = entry;
-  if (is_new) {
-    data_->num_entries++;
+void SharedGroupCache::unlink_bucket_locked(int32_t index) {
+  SharedCacheEntry* entries = entry_array(data_);
+  int32_t* head = &bucket_array(data_)[bucket_index(data_, entries[index].addr)];
+  int32_t* link = head;
+  while (*link != index) {
+    // The victim is always in its own chain, so this is guaranteed to end.
+    link = &entries[*link].hash_next;
   }
+  *link = entries[index].hash_next;
+}
+
+void SharedGroupCache::unlink_lru_locked(int32_t index) {
+  SharedCacheEntry* entries = entry_array(data_);
+  const SharedCacheEntry& entry = entries[index];
+  if (entry.lru_prev >= 0) {
+    entries[entry.lru_prev].lru_next = entry.lru_next;
+  } else {
+    data_->lru_head = entry.lru_next;
+  }
+  if (entry.lru_next >= 0) {
+    entries[entry.lru_next].lru_prev = entry.lru_prev;
+  } else {
+    data_->lru_tail = entry.lru_prev;
+  }
+  entries[index].lru_prev = -1;
+  entries[index].lru_next = -1;
+}
+
+void SharedGroupCache::link_front_locked(int32_t index) {
+  SharedCacheEntry* entries = entry_array(data_);
+  entries[index].lru_prev = -1;
+  entries[index].lru_next = data_->lru_head;
+  if (data_->lru_head >= 0) {
+    entries[data_->lru_head].lru_prev = index;
+  }
+  data_->lru_head = index;
+  if (data_->lru_tail < 0) {
+    data_->lru_tail = index;
+  }
+}
+
+void SharedGroupCache::touch_locked(int32_t index) {
+  unlink_lru_locked(index);
+  link_front_locked(index);
 }
 
 // ---- Public API ----
@@ -129,42 +252,50 @@ void SharedGroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
     return;
   }
 
-  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result != 0) {
-    // GCOV_EXCL_START - EOWNERDEAD is the only reachable failure (the previous
-    // owner died); a hard error needs an invalid mutex and cannot be injected.
-    if (lock_result == EOWNERDEAD) {
-      // Previous owner died while holding the lock — make it consistent.
-      ::pthread_mutex_consistent(&data_->mutex);
-    } else {
+  {
+    CacheLock lock(data_->mutex);
+    // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+    if (!lock.acquired()) {
       return;
     }
     // GCOV_EXCL_STOP
+
+    // Increment the raw counter and store the wrapped position so the
+    // client-facing index `i` stays bounded.  Wrapped values are 1-based
+    // (1..kPositionModulus-1, 0 at wrap) so they match position() and the
+    // client's `i` parameter: after a single push pushed_at == position().
+    const uint32_t raw_pos = data_->position.fetch_add(1);
+    const uint32_t wrapped_pos = (raw_pos + 1) % kPositionModulus;
+
+    int32_t index = find_locked(addr);
+    if (index < 0) {
+      index = allocate_locked();
+      SharedCacheEntry* entries = entry_array(data_);
+      entries[index] = SharedCacheEntry{};
+      entries[index].addr = addr;
+      const std::size_t bucket = bucket_index(data_, addr);
+      entries[index].hash_next = bucket_array(data_)[bucket];
+      bucket_array(data_)[bucket] = index;
+      link_front_locked(index);
+    } else {
+      touch_locked(index);
+    }
+
+    SharedCacheEntry& entry = entry_array(data_)[index];
+    const std::size_t len = std::min(value.size(), kMaxSharedValueBytes);
+    entry.value_len = static_cast<uint16_t>(len);
+    entry.timestamp = static_cast<uint32_t>(std::time(nullptr));
+    entry.pushed_at = wrapped_pos;
+    std::memset(entry.value, 0, sizeof(entry.value));
+    if (len > 0) {
+      std::memcpy(entry.value, value.data(), len);
+    }
+
+    // Signal new data.
+    data_->generation.fetch_add(1);
   }
 
-  // Increment the raw counter and store the wrapped position so the client-facing
-  // index `i` stays bounded.  Wrapped values are 1-based (1..kPositionModulus-1, 0 at wrap)
-  // so they match the position() return value and the client's `i` parameter.
-  // Using (raw_pos + 1) % M ensures pushed_at == position() for a single-entry push,
-  // so get_delta(since_pos) correctly identifies entries newer than since_pos.
-  uint32_t raw_pos = data_->position.fetch_add(1);
-  uint32_t wrapped_pos = (raw_pos + 1) % kPositionModulus;
-
-  SharedCacheEntry entry{};
-  entry.addr = addr;
-  entry.value_len = static_cast<uint16_t>(std::min(value.size(), kMaxSharedValueBytes));
-  entry.timestamp = static_cast<uint32_t>(std::time(nullptr));
-  entry.pushed_at = wrapped_pos;
-  std::memcpy(entry.value, value.data(), entry.value_len);
-
-  insert_locked(addr, entry);
-
-  // Increment generation to signal new data.
-  data_->generation.fetch_add(1);
-
-  ::pthread_mutex_unlock(&data_->mutex);
-
-  // Wake all blocked long-poll readers.
+  // Wake all blocked long-poll readers (outside the lock).
   notify_all();
 }
 
@@ -173,32 +304,25 @@ std::optional<std::vector<uint8_t>> SharedGroupCache::get(uint16_t addr, int max
     return std::nullopt;
   }
 
-  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result != 0) {
-    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
-    if (lock_result == EOWNERDEAD) {
-      ::pthread_mutex_consistent(&data_->mutex);
-    } else {
-      return std::nullopt;
-    }
-    // GCOV_EXCL_STOP
+  CacheLock lock(data_->mutex);
+  // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+  if (!lock.acquired()) {
+    return std::nullopt;
   }
+  // GCOV_EXCL_STOP
 
   std::optional<std::vector<uint8_t>> result;
-  size_t slot = find_slot(addr);
-  if (slot < kSharedCacheCapacity && data_->entries[slot].addr == addr) {
-    const auto& e = data_->entries[slot];
-    if (max_age_sec >= 0) {
-      auto now = static_cast<uint32_t>(std::time(nullptr));
-      if (now - e.timestamp < static_cast<uint32_t>(max_age_sec)) {
-        result.emplace(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
-      }
-    } else {
-      result.emplace(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
+  const int32_t index = find_locked(addr);
+  if (index >= 0) {
+    const SharedCacheEntry& entry = entry_array(data_)[index];
+    // Signed difference: a clock step backwards must neither wrap nor make
+    // the entry look infinitely old.
+    const std::int64_t age =
+        static_cast<std::int64_t>(std::time(nullptr)) - static_cast<std::int64_t>(entry.timestamp);
+    if (max_age_sec < 0 || age < static_cast<std::int64_t>(max_age_sec)) {
+      result.emplace(entry.value, entry.value + entry.value_len);
     }
   }
-
-  ::pthread_mutex_unlock(&data_->mutex);
   return result;
 }
 
@@ -210,55 +334,42 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
     return delta;
   }
 
-  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result != 0) {
-    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
-    if (lock_result == EOWNERDEAD) {
-      ::pthread_mutex_consistent(&data_->mutex);
-    } else {
-      return delta;
-    }
-    // GCOV_EXCL_STOP
+  CacheLock lock(data_->mutex);
+  // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+  if (!lock.acquired()) {
+    return delta;
   }
+  // GCOV_EXCL_STOP
 
   // Current wrapped position (0-based, wraps at kPositionModulus).
   delta.position = data_->position.load() % kPositionModulus;
 
   // Modular distance from the client's last-seen position to the current position.
-  // This tells us how far ahead (in modular space) the cache has advanced since
-  // the client last polled.
-  uint32_t epoch_distance = (delta.position - since_pos + kPositionModulus) % kPositionModulus;
+  const uint32_t epoch_distance =
+      (delta.position - since_pos + kPositionModulus) % kPositionModulus;
 
-  // Epoch detection: if the distance is >= half the modulus, the client is from
-  // a previous wrap-around epoch.  In that case we return all current values for
-  // the subscribed addresses (full refresh) instead of a delta.
-  // Epoch mismatch when the client is more than half the modulus away.
-  // With M=100_000, this threshold = 50_000 entries (~17 min at 50 tps),
-  // far exceeding the 300-second long-poll timeout.
-  bool epoch_mismatch = (since_pos != 0 && epoch_distance >= kPositionModulus / 2);
+  // Epoch detection: a client that is more than half the modulus behind comes
+  // from a previous wrap-around epoch and gets a full refresh.
+  // With M=100_000 this threshold is 50_000 entries (~17 min at 50 tps), far
+  // exceeding the 300-second long-poll timeout.
+  const bool epoch_mismatch = (since_pos != 0 && epoch_distance >= kPositionModulus / 2);
 
-  uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+  const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
 
-  for (uint16_t addr : subscribed) {
-    size_t slot = find_slot(addr);
-    if (slot >= kSharedCacheCapacity) {
+  for (const uint16_t addr : subscribed) {
+    const int32_t index = find_locked(addr);
+    if (index < 0) {
       continue;
     }
-    const auto& e = data_->entries[slot];
-    if (e.addr != addr) {
-      continue;
-    }
-    if (max_age_sec >= 0 && now - e.timestamp >= static_cast<uint32_t>(max_age_sec)) {
+    const SharedCacheEntry& entry = entry_array(data_)[index];
+    const std::int64_t age = now - static_cast<std::int64_t>(entry.timestamp);
+    if (max_age_sec >= 0 && age >= static_cast<std::int64_t>(max_age_sec)) {
       continue;
     }
 
-    if (epoch_mismatch) {
-      // Full refresh: return all subscribed values regardless of pushed_at.
-      delta.values[addr] =
-          std::vector<uint8_t>(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
-    } else {
-      // Normal delta: only include entries newer than since_pos (modular).
-      uint32_t entry_dist = (e.pushed_at - since_pos + kPositionModulus) % kPositionModulus;
+    if (!epoch_mismatch) {
+      const uint32_t entry_dist =
+          (entry.pushed_at - since_pos + kPositionModulus) % kPositionModulus;
       // An entry is newer if its distance is positive and within epoch_distance.
       // When since_pos=0 (new client), pushed_at=0 is valid first-push data.
       if (entry_dist > epoch_distance) {
@@ -267,12 +378,9 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
       if (since_pos != 0 && entry_dist == 0) {
         continue;
       }
-      delta.values[addr] =
-          std::vector<uint8_t>(std::begin(e.value), std::next(std::begin(e.value), e.value_len));
     }
+    delta.values[addr] = std::vector<uint8_t>(entry.value, entry.value + entry.value_len);
   }
-
-  ::pthread_mutex_unlock(&data_->mutex);
   return delta;
 }
 
@@ -281,31 +389,23 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
     return false;
   }
 
-  const int lock_result = ::pthread_mutex_lock(&data_->mutex);
-  if (lock_result != 0) {
-    // GCOV_EXCL_START - see push(): only EOWNERDEAD is reachable
-    if (lock_result == EOWNERDEAD) {
-      ::pthread_mutex_consistent(&data_->mutex);
-    } else {
-      return false;
-    }
-    // GCOV_EXCL_STOP
+  CacheLock lock(data_->mutex);
+  // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+  if (!lock.acquired()) {
+    return false;
   }
+  // GCOV_EXCL_STOP
 
-  uint32_t gen_before = data_->generation.load();
-
+  const uint32_t gen_before = data_->generation.load();
   if (timeout_ms <= 0) {
-    // Zero timeout: non-blocking check — has the cache ever received data?
-    // This is useful for poll loops that want to check without blocking.
-    bool has_data = data_->generation.load() > 0;
-    ::pthread_mutex_unlock(&data_->mutex);
-    return has_data;
+    // Nothing can arrive within a zero-length wait.
+    return false;
   }
 
-  // Compute absolute timeout using monotonic clock.
+  // Absolute deadline on the monotonic clock (the condvar uses it too).
   struct timespec ts {};
   ::clock_gettime(CLOCK_MONOTONIC, &ts);
-  int64_t total_ns =
+  const int64_t total_ns =
       static_cast<int64_t>(ts.tv_nsec) + static_cast<int64_t>(timeout_ms) * 1'000'000LL;
   ts.tv_sec += static_cast<time_t>(total_ns / 1'000'000'000LL);
   ts.tv_nsec = static_cast<decltype(ts.tv_nsec)>(total_ns % 1'000'000'000LL);
@@ -313,21 +413,18 @@ bool SharedGroupCache::wait_for_new_data(int timeout_ms) {
   // Wait loop: handles spurious wakeups.
   bool timed_out = false;
   while (data_->generation.load() == gen_before && !timed_out) {
-    int rc = ::pthread_cond_timedwait(&data_->cond, &data_->mutex, &ts);
+    const int rc = ::pthread_cond_timedwait(&data_->cond, &data_->mutex, &ts);
     if (rc == ETIMEDOUT) {
       timed_out = true;
     }
     // GCOV_EXCL_START - a hard condvar error needs an invalid condvar
     else if (rc != 0) {
-      break;  // error
+      break;
     }
     // GCOV_EXCL_STOP
   }
 
-  uint32_t gen_after = data_->generation.load();
-  ::pthread_mutex_unlock(&data_->mutex);
-
-  return gen_after != gen_before;
+  return data_->generation.load() != gen_before;
 }
 
 void SharedGroupCache::notify_all() {
@@ -335,6 +432,39 @@ void SharedGroupCache::notify_all() {
     // No need to hold the mutex for broadcast (POSIX allows it).
     ::pthread_cond_broadcast(&data_->cond);
   }
+}
+
+std::size_t SharedGroupCache::size() const {
+  if (data_ == nullptr) {
+    return 0;
+  }
+  CacheLock lock(data_->mutex);
+  // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+  if (!lock.acquired()) {
+    return 0;
+  }
+  // GCOV_EXCL_STOP
+  return data_->num_entries;
+}
+
+std::size_t SharedGroupCache::capacity() const {
+  if (data_ == nullptr) {
+    return 0;
+  }
+  return data_->capacity;
+}
+
+std::uint64_t SharedGroupCache::evictions() const {
+  if (data_ == nullptr) {
+    return 0;
+  }
+  CacheLock lock(data_->mutex);
+  // GCOV_EXCL_START - see CacheLock: a hard lock error needs an invalid mutex
+  if (!lock.acquired()) {
+    return 0;
+  }
+  // GCOV_EXCL_STOP
+  return data_->evictions;
 }
 
 void SharedGroupCache::publish_bus_status(bool available) {
@@ -347,19 +477,21 @@ void SharedGroupCache::publish_bus_status(bool available, uint32_t now) {
   }
 
   if (available) {
-    // Set the timestamp before flipping the flag so a reader that sees
-    // "available" also sees an up-to-date last_ok.
-    data_->knxd_last_ok.store(now);
-    data_->knxd_down_since.store(0);
-    data_->knxd_available.store(1);
+    // Timestamps first, then the flag: a reader that sees "available" with
+    // acquire ordering also sees the timestamps.
+    data_->bus_last_ok.store(now);
+    data_->bus_down_since.store(0);
+    data_->bus_available.store(1, std::memory_order_release);
     return;
   }
 
   // Keep the timestamp of the first failure of the current outage — retries
   // every few seconds must not move the reported "down since" forward.
   uint32_t expected = 0;
-  (void)data_->knxd_down_since.compare_exchange_strong(expected, now);
-  data_->knxd_available.store(0);
+  (void)data_->bus_down_since.compare_exchange_strong(expected, now);
+  // Publish "unavailable" only after down_since is meaningful, so a reader can
+  // never observe an outage without a "since" timestamp.
+  data_->bus_available.store(0, std::memory_order_release);
 }
 
 SharedGroupCache::BusStatus SharedGroupCache::bus_status() const {
@@ -367,9 +499,10 @@ SharedGroupCache::BusStatus SharedGroupCache::bus_status() const {
   if (data_ == nullptr) {
     return status;
   }
-  status.available = data_->knxd_available.load() != 0;
-  status.last_ok = data_->knxd_last_ok.load();
-  status.down_since = data_->knxd_down_since.load();
+  // Load the flag first (acquire): it publishes the timestamps written before.
+  status.available = data_->bus_available.load(std::memory_order_acquire) != 0;
+  status.last_ok = data_->bus_last_ok.load();
+  status.down_since = data_->bus_down_since.load();
   return status;
 }
 

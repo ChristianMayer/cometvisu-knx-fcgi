@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <iostream>
 #include <vector>
 
 #include "bus/bus_link.h"
@@ -37,7 +36,6 @@
 #include "util/hex.h"
 
 namespace cvknx {
-namespace {}  // namespace
 
 namespace detail {
 
@@ -45,7 +43,7 @@ void sleep_interruptible(int duration_ms, int slice_ms, const std::function<bool
   const int slice = std::max(1, slice_ms);
   int remaining = duration_ms;
   while (remaining > 0) {
-    if (should_stop && should_stop()) {
+    if (stop_requested(should_stop)) {
       return;
     }
     const int chunk = std::min(remaining, slice);
@@ -73,14 +71,15 @@ int drain_telegrams(BusLink& link, SharedGroupCache& cache) {
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
   while (link.poll_group_telegram(addr, apdu)) {
-    ApduType apdu_type{};
-    std::vector<uint8_t> value_data;
-    if (!parse_apdu(apdu, apdu_type, value_data) || apdu_type == ApduType::Read) {
+    // Only the three group-value services are interesting; a management
+    // frame, a reserved APCI or a read request is dropped here.
+    const auto parsed = parse_apdu(apdu);
+    if (!parsed || parsed->type == ApduType::Read) {
       continue;
     }
-    cache.push(addr, value_data);
+    cache.push(addr, parsed->data);
     DebugLog::knxd_recv("cache_push", KnxGroupAddress::from_eibaddr(addr).to_string(),
-                        hex_encode(value_data.data(), value_data.size()));
+                        hex_encode(parsed->data.data(), parsed->data.size()));
     ++pushed;
   }
   return pushed;
@@ -98,34 +97,44 @@ namespace detail {
 /// backlog.  Eight telegrams per batch keeps both latencies bounded.
 inline constexpr int kMaxTxBatch = 8;
 
-/// Outcome of one drain batch.
-struct TxDrain {
-  int sent = 0;
-  /// A send failed: the link is in trouble.  The caller must not spin — the
-  /// telegram stays queued and is retried after a normal wait.
-  bool failed = false;
-};
-
 /// Send waiting telegrams into the bus.
-/// Clears the eventfd first, so a push during draining re-arms it.
+///
+/// Clears the eventfd first, so a push during draining re-arms it.  Telegrams
+/// are paced by `BusLink::min_send_interval_ms()`; the pacing is expressed as
+/// a wait *after* the batch, never as a sleep inside the loop, so an inbound
+/// telegram is still delivered immediately (AGENTS.md rule 2).
+///
 /// @param stop_requested Checked between telegrams, so shutdown stays prompt.
+/// @param next_send_at Earliest time the next telegram may go out (state of
+///        the loop, updated here).
 TxDrain drain_tx_queue(BusLink& link, SharedTxQueue& queue,
-                       const std::function<bool()>& stop_requested, int max_batch) {
+                       const std::function<bool()>& should_stop, int max_batch,
+                       std::chrono::steady_clock::time_point& next_send_at) {
   queue.drain_notifications();
   TxDrain result;
-  int& sent = result.sent;
+  const auto interval = std::chrono::milliseconds(std::max(0, link.min_send_interval_ms()));
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
-  while (sent < max_batch && !stop_requested() && queue.peek(addr, apdu)) {
+  // An empty predicate means "never stop" (see stop_requested()).
+  while (result.sent < max_batch && !stop_requested(should_stop) && queue.peek(addr, apdu)) {
+    if (interval.count() > 0) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now < next_send_at) {
+        result.wait_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(next_send_at - now).count() + 1);
+        break;
+      }
+    }
     if (!link.send_group_packet(addr, apdu)) {
       // The link is gone.  The telegram stays queued and is sent after the
       // reconnect — a write must never be lost silently.
-      std::cerr << "[WARN] Failed to send queued telegram to " << link.label() << "\n";
+      DebugLog::log(DebugLog::Level::Warn, "failed to send queued telegram to " + link.label());
       result.failed = true;
       break;
     }
     queue.pop_drop();
-    ++sent;
+    ++result.sent;
+    next_send_at = std::chrono::steady_clock::now() + interval;
     DebugLog::knxd_send("tx_queue", KnxGroupAddress::from_eibaddr(addr).to_string(),
                         hex_encode(apdu.data(), apdu.size()));
   }
@@ -212,22 +221,24 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
   // Passing an empty std::function is allowed and means "never stop".
   const auto stop = [&should_stop]() { return stop_requested(should_stop); };
 
-  // Rate-limited warning while knxd is unreachable.
+  // Rate-limited warning while the bus is unreachable.
   const int retry_log_interval_ms = std::max(0, options.retry_log_interval_ms);
   const auto log_retry = [&logged_failure, &last_log,
                           retry_log_interval_ms](const std::string& reason) {
     const auto now = std::chrono::steady_clock::now();
     const auto since_last_log =
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log).count();
-    const bool interval_passed = since_last_log >= retry_log_interval_ms;
-    const bool due = !logged_failure || interval_passed;
+    const bool due = !logged_failure || since_last_log >= retry_log_interval_ms;
     if (due) {
-      // Emitted as a single line: the reader shares stderr with all workers.
-      std::cerr << "[WARN] " + reason + " — retrying in the background\n";
+      DebugLog::log(DebugLog::Level::Warn, reason + " — retrying in the background");
       last_log = now;
       logged_failure = true;
     }
   };
+
+  // Earliest time the next telegram may be handed to the bus (transport
+  // specific pacing; zero for transports without a rate limit).
+  auto next_send_at = std::chrono::steady_clock::time_point{};
 
   // Start out unavailable: until the first handshake succeeds there is no
   // bus connection, and /r clients should see that right away.
@@ -241,10 +252,10 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
         connected = true;
         backoff_ms = initial_backoff_ms;
         cache.publish_bus_status(true);
+        next_send_at = std::chrono::steady_clock::time_point{};
 
         if (logged_failure) {
-          std::cout << "[INFO] Bus connection restored to " << link.label() << "\n";
-          std::cout << std::flush;  // stdout is block-buffered when redirected
+          DebugLog::log(DebugLog::Level::Info, "bus connection restored to " + link.label());
           logged_failure = false;
         }
         continue;  // immediately look for pending telegrams
@@ -254,7 +265,7 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
       link.disconnect();
       cache.publish_bus_status(false);  // keeps the first outage timestamp
 
-      log_retry("Cannot connect to " + link.label());
+      log_retry("cannot connect to " + link.label());
       sleep_interruptible(backoff_ms, options.sleep_slice_ms, should_stop);
       backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
       continue;
@@ -267,10 +278,12 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
     int sent = 0;
     bool backlog = false;
     bool send_failed = false;
+    int pace_wait_ms = 0;
     if (tx_queue != nullptr) {
-      const auto drained = detail::drain_tx_queue(link, *tx_queue, stop, detail::kMaxTxBatch);
+      const auto drained = drain_tx_queue(link, *tx_queue, stop, detail::kMaxTxBatch, next_send_at);
       sent = drained.sent;
       send_failed = drained.failed;
+      pace_wait_ms = drained.wait_ms;
       // A failing link must not turn the backlog into a busy loop: fall through
       // to a normal (sleeping) wait and retry after it.
       backlog = (tx_queue->size() > 0) && !send_failed;
@@ -281,20 +294,28 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
 
     // ---------------- Wait for activity ----------------
     // While a backlog remains, poll with a zero timeout: that services inbound
-    // telegrams between two write batches instead of starving them.
+    // telegrams between two write batches instead of starving them.  A pacing
+    // delay is a real timeout, so reception keeps running while we wait for
+    // the transport's rate limit to expire.
     //
     // maintain() runs before every wait: this loop polls the raw fds, so a
     // transport that needs keep-alive traffic (KNXnet/IP tunnelling) would
     // otherwise never send its heartbeat.
     link.maintain();
+    int wait_ms = wait_timeout_ms;
+    if (backlog) {
+      // Zero while a backlog is being drained; otherwise the remaining pacing
+      // delay (which is a poll timeout, so RX keeps working).
+      wait_ms = pace_wait_ms > 0 ? pace_wait_ms : 0;
+    }
     Activity activity = Activity::Timeout;
     if (!link.is_connected()) {
       activity = Activity::Error;
     } else {
-      activity = detail::wait_for_activity(link, tx_queue, backlog ? 0 : wait_timeout_ms);
+      activity = detail::wait_for_activity(link, tx_queue, wait_ms);
     }
     if (activity == Activity::Tx) {
-      continue;  // a worker queued a telegram — send it right away
+      continue;  // a worker queued a telegram (or the pacing delay expired)
     }
     if (activity == Activity::Data) {
       if (drain_telegrams(link, cache) > 0) {
@@ -309,7 +330,8 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
       // Connection lost (daemon restarted / "Link down, terminating" /
       // router gone).  Never fall through to a busy loop: back off, then
       // reconnect.
-      std::cerr << "[WARN] Lost connection to " + link.label() + " — reconnecting\n";
+      DebugLog::log(DebugLog::Level::Warn,
+                    "lost connection to " + link.label() + " — reconnecting");
       logged_failure = true;
       last_log = std::chrono::steady_clock::now();
 

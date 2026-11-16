@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "../../src/knxnetip/cemi.h"
 #include "../../src/knxnetip/knxnetip_frame.h"
 
 namespace cvknx::knxnetip {
@@ -249,6 +250,44 @@ TEST(FrameNegative, SearchResponseSkipsShortDeviceInfoDib) {
   ASSERT_TRUE(parsed.has_value());
   EXPECT_TRUE(parsed->device_name.empty());
   EXPECT_EQ(parsed->individual_address, 0);
+}
+
+/// The zero-copy routing payload validator must apply the same checks as
+/// parse_frame() / parse_routing_indication().
+TEST(KnxnetipFrameNegativeTest, RoutingPayloadRejectsMalformedFrames) {
+  const Bytes valid = knxnetip::build_routing_indication(
+      cemi::encode_group_indication(0x1101, 0x0A03, cemi::Bytes{0x00, 0x80, 0x42}));
+
+  // Valid frame: the payload is a view into the buffer.
+  const auto payload = knxnetip::parse_routing_payload(valid);
+  ASSERT_TRUE(payload.has_value());
+  EXPECT_EQ(payload->size(), valid.size() - 6);
+
+  // Too short for the header.
+  EXPECT_FALSE(knxnetip::parse_routing_payload(std::span<const std::uint8_t>{}).has_value());
+  EXPECT_FALSE(knxnetip::parse_routing_payload(Bytes{0x06}).has_value());
+
+  // Wrong header length / protocol version.
+  Bytes bad_header = valid;
+  bad_header[0] = 0x07;
+  EXPECT_FALSE(knxnetip::parse_routing_payload(bad_header).has_value());
+  bad_header = valid;
+  bad_header[1] = 0x20;
+  EXPECT_FALSE(knxnetip::parse_routing_payload(bad_header).has_value());
+
+  // Not a ROUTING_INDICATION.
+  EXPECT_FALSE(knxnetip::parse_routing_payload(knxnetip::build_search_request(knxnetip::Hpai{}))
+                   .has_value());
+
+  // Length field does not match the datagram.
+  Bytes bad_length = valid;
+  bad_length[4] = 0x00;
+  bad_length[5] = 0x08;
+  EXPECT_FALSE(knxnetip::parse_routing_payload(bad_length).has_value());
+
+  // A bare header carries no payload.
+  const Bytes header_only = {0x06, 0x10, 0x05, 0x30, 0x00, 0x06};
+  EXPECT_FALSE(knxnetip::parse_routing_payload(header_only).has_value());
 }
 
 }  // namespace

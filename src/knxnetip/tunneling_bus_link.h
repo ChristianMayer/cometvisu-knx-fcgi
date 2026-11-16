@@ -93,8 +93,9 @@ private:
   void process(const std::vector<std::uint8_t>& datagram);
   /// Send a CONNECTIONSTATE_REQUEST when the heartbeat interval has elapsed.
   void send_heartbeat_if_due();
-  /// True when an unanswered heartbeat expired (marks the tunnel lost).
-  [[nodiscard]] bool heartbeat_expired();
+  /// True when an unanswered heartbeat expired (pure query; maintain() then
+  /// marks the tunnel lost).
+  [[nodiscard]] bool heartbeat_overdue() const;
   /// Send a datagram to the configured device (the socket is not connected,
   /// so send() alone would fail with ENOTCONN).
   bool send_to_device(const std::vector<std::uint8_t>& datagram);
