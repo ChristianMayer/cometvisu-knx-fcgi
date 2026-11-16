@@ -33,8 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Direct KNXnet/IP routing** (`KNX_TRANSPORT=ip-routing`): the backend joins
   the routing multicast group (default `224.0.23.12`) and works with **no knxd
   installed**.
+- **`KNX_IP_INDIVIDUAL_ADDR`** (`ip-routing`, default `15.15.250`): the cEMI
+  source address of our routing indications.  A router rejects a frame from
+  `0.0.0`, so this is what makes a routing *write* reach the bus.
 - **`--discover`**: sends a KNXnet/IP SEARCH_REQUEST and lists every answering
   device with its individual and multicast address.
+- **Black-box interoperability suites** (`tests/e2e/test_ip_routing_blackbox.cpp`,
+  `tests/e2e/test_ip_tunnel_blackbox.cpp`): a real `knxd` provides the
+  KNXnet/IP router and tunnel server, `knxtool` injects telegrams, a test
+  process monitors the multicast backbone and the deployed binary is driven over
+  a direct FastCGI socket.  59 cases cover login, long-poll, writes, duplicate
+  delivery, reconnect, outage reporting and the transport options.  They skip
+  themselves when `knxd`/`knxtool` are not installed.
 
 ### Changed
 
@@ -52,6 +62,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ip-routing` never exchanged a single frame with a real KNXnet/IP router.**
+  The `ROUTING_INDICATION` service code was `0x0330`; the KNXnet/IP standard
+  (03_08_01, 5.*) defines `0x0530` (`ROUTING_LOST_MESSAGE` `0x0531`,
+  `ROUTING_BUSY` `0x0532`).  Routers silently dropped our frames and we dropped
+  theirs, so the transport could neither read nor write the bus.
+- **`ip-routing` used the wrong cEMI frame type for writes.**  A routing
+  participant acts as a router, so it sends `L_Data.ind` (`0x29`); an
+  `L_Data.req` (`0x11`) — the tunnelling frame type — is discarded by knxd and
+  by real interfaces.  Writes are now published as an indication with the
+  configured individual address.
+- **`ip-tunnel` could not talk to a real interface.**  The `TUNNELLING_REQUEST`
+  / `TUNNELLING_ACK` service codes were `0x0320`/`0x0321` instead of
+  `0x0420`/`0x0421`, so devices ignored our data frames (and we ignored theirs),
+  and a device never ACKed a write.
+- **`CONNECT_REQUEST` was missing the CRI structure-length byte.**  A device
+  validates `CRI[0] == body size - 16` and drops the request otherwise; the
+  tunnel never came up.
+- **`TUNNELLING_ACK` was one byte too long.**  The acknowledgement has no
+  reserved byte (structure length, channel, sequence, status), so every ACK of a
+  real device was rejected as malformed — writes were retransmitted and then
+  dropped, and the sequence counter ran out of sync.
+- **The tunnelling heartbeat was never sent.**  The cache reader polls the raw
+  file descriptors and never called the transport's timer logic, so
+  `KNX_IP_HEARTBEAT_SEC` had no effect and a device would drop the tunnel after
+  120 s of silence.  `BusLink::maintain()` now runs once per loop iteration.
+- **A dead KNXnet/IP device was never noticed.**  An unanswered
+  `CONNECTIONSTATE_REQUEST` now ends the tunnel, so `/r` reports the outage
+  instead of waiting forever on frozen values.
+- **`ip-routing` selected its outgoing interface by index**, which leaves the
+  source address to the routing table — wrong on a multi-homed host and when
+  another KNXnet/IP participant runs on the same host.  The interface's IPv4
+  address is used instead.
 - **A `POST`/`PUT` request could terminate a worker** in direct-socket mode: the
   body length was taken from the wrong stream and an overflowing value threw
   out of the request loop.  The worker died (and was restarted), the request was

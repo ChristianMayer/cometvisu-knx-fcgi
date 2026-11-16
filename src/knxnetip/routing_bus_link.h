@@ -23,9 +23,12 @@
  * stateless.
  *
  * Own echoes: the loop is enabled so a local router/knxd can see our frames.
- * Echoes come back as cEMI L_Data.req (0x11) and are dropped by the codec,
- * which only accepts L_Data.ind (0x29) — a write is therefore never delivered
- * twice.
+ * Every participant on a routing backbone acts as a router, so the cEMI of a
+ * ROUTING_INDICATION must be an L_Data.ind (0x29) — an L_Data.req (0x11) is
+ * silently dropped by knxd and by real interfaces.  Our own frame comes back
+ * as L_Data.ind and is treated as the bus echo of the write: it is pushed into
+ * the shared cache exactly once, which is what announces the new value to the
+ * other clients.
  */
 
 #pragma once
@@ -47,6 +50,9 @@ struct RoutingOptions {
   std::uint16_t port = 3671;
   /// Interface name for the group join / IP_MULTICAST_IF (empty = default).
   std::string iface;
+  /// Individual address used as the cEMI source of our routing indications.
+  /// A router rejects 0.0.0 and its own tunnel client addresses.
+  std::uint16_t source_address = 0xFFFA;  // 15.15.250
   /// Local bind port; 0 = let the kernel pick an ephemeral port (loopback
   /// tests).  RoutingOptions::from_config() binds the configured port.
   std::uint16_t bind_port = 0;

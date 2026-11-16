@@ -80,3 +80,34 @@ target_compile_definitions(test_main_e2e PRIVATE CVKNX_BINARY="$<TARGET_FILE:com
 add_dependencies(test_main_e2e cometvisu-knx-fcgi)
 add_test(NAME test_main_e2e COMMAND test_main_e2e)
 set_tests_properties(test_main_e2e PROPERTIES TIMEOUT 180)
+
+# ---------------------------------------------------------------------------
+# Black-box tests of the direct KNXnet/IP transports.
+#
+# These start a real knxd (KNXnet/IP router and/or tunnel server), inject
+# telegrams with knxtool, monitor the multicast backbone from a test process
+# and drive the deployed binary over a direct FastCGI socket.  They need no
+# knxd headers, so they are built in every configuration; at run time they
+# skip themselves when knxd/knxtool are not installed.
+# ---------------------------------------------------------------------------
+add_library(cvknx_blackbox STATIC knxnetip_blackbox.cpp)
+target_include_directories(cvknx_blackbox PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(cvknx_blackbox PUBLIC CVKNX_BINARY="$<TARGET_FILE:cometvisu-knx-fcgi>")
+target_link_libraries(cvknx_blackbox PUBLIC GTest::gtest pthread)
+add_dependencies(cvknx_blackbox cometvisu-knx-fcgi)
+
+add_executable(test_ip_routing_blackbox
+    test_ip_routing_blackbox.cpp
+)
+target_link_libraries(test_ip_routing_blackbox PRIVATE cvknx_blackbox GTest::gtest GTest::gtest_main pthread)
+add_test(NAME test_ip_routing_blackbox COMMAND test_ip_routing_blackbox)
+set_tests_properties(test_ip_routing_blackbox PROPERTIES TIMEOUT 300)
+set_tests_properties(test_ip_routing_blackbox PROPERTIES LABELS "blackbox")
+
+add_executable(test_ip_tunnel_blackbox
+    test_ip_tunnel_blackbox.cpp
+)
+target_link_libraries(test_ip_tunnel_blackbox PRIVATE cvknx_blackbox GTest::gtest GTest::gtest_main pthread)
+add_test(NAME test_ip_tunnel_blackbox COMMAND test_ip_tunnel_blackbox)
+set_tests_properties(test_ip_tunnel_blackbox PROPERTIES TIMEOUT 300)
+set_tests_properties(test_ip_tunnel_blackbox PROPERTIES LABELS "blackbox")

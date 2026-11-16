@@ -15,10 +15,13 @@ configuration in [README.md](README.md), and the release history in
   KNXnet/IP frame codec.  Explicitly out of scope for 2.0.0: deployments that
   need it stay on the `knxd` transport.  The frame codec in `src/knxnetip/` is
   transport-neutral, so a wrapper can be added without touching any `BusLink`.
-- **Interop runs against real hardware** — the unit tests use loopback fakes for
-  `ip-tunnel` and `ip-routing`.  A manual checklist with a real interface
-  (MDT, Gira, Siemens …) and with `knxd` in `ip:` / `iptn:` mode is still
-  missing; `tools/fake-knxnetip-router.py` covers the protocol side only.
+- **Interop runs against real hardware** — a real interface (MDT, Gira,
+  Siemens …) is still a manual checklist.  Everything a KNXnet/IP peer does on
+  the wire is automated now: `tests/e2e/test_ip_routing_blackbox.cpp` and
+  `tests/e2e/test_ip_tunnel_blackbox.cpp` drive a real `knxd` as the KNXnet/IP
+  router and tunnel server, inject with `knxtool` and monitor the multicast
+  backbone.  Those suites found and now guard the service codes, the CRI length
+  byte, the ACK layout, the routing cEMI type and the keep-alive.
 
 ## Not planned
 

@@ -78,6 +78,9 @@ and built automatically after the container is created; the existing
 # Run tests
 ctest --test-dir build --output-on-failure
 
+# Only the black-box interoperability suites (needs knxd + knxtool)
+ctest --test-dir build -L blackbox --output-on-failure
+
 # Run via spawn-fcgi (traditional FastCGI mode)
 KNX_TRANSPORT=knxd spawn-fcgi -p 9000 -n ./build/src/cometvisu-knx-fcgi
 
@@ -123,6 +126,7 @@ does that for you.
 | `KNX_IP_PORT`         | `3671`     | KNXnet/IP UDP port                       |
 | `KNX_IP_LOCAL_ADDR`   | *(OS choice)* | `ip-tunnel`: local address advertised in the HPAI (NAT friendly when unset) |
 | `KNX_IP_MULTICAST`    | `224.0.23.12` | `ip-routing`: multicast group          |
+| `KNX_IP_INDIVIDUAL_ADDR` | `15.15.250` | `ip-routing`: individual address used as the cEMI source of our routing telegrams (`A.L.D`). A router rejects `0.0.0`, so this must be a free address of the installation. |
 | `KNX_IP_IFACE`        | *(default)* | `ip-routing`: interface for the group join / `IP_MULTICAST_IF` |
 | `KNX_IP_NAT`          | `0`        | `ip-tunnel`: `1` = NAT mode              |
 | `KNX_IP_HEARTBEAT_SEC`| `60`       | `ip-tunnel`: `CONNECTIONSTATE_REQUEST` interval (10–86400) |

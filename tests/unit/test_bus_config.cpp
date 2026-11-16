@@ -74,6 +74,37 @@ TEST(BusConfigTest, IpRoutingNeedsNoHost) {
   ASSERT_TRUE(cfg.has_value()) << error;
   EXPECT_EQ(cfg->transport, BusTransport::IpRouting);
   EXPECT_EQ(cfg->ip_multicast, "224.0.23.12");
+  EXPECT_EQ(cfg->ip_individual_addr, 0xFFFA);  // 15.15.250
+}
+
+TEST(BusConfigTest, IpRoutingParsesTheIndividualAddress) {
+  std::string error;
+  const auto cfg =
+      parse_env({{"KNX_TRANSPORT", "ip-routing"}, {"KNX_IP_INDIVIDUAL_ADDR", "1.1.240"}}, error);
+  ASSERT_TRUE(cfg.has_value()) << error;
+  EXPECT_EQ(cfg->ip_individual_addr, 0x11F0);
+}
+
+TEST(BusConfigTest, InvalidIndividualAddressIsRejected) {
+  for (const char* value :
+       {"1.1", "1.1.0", "16.1.1", "1.16.1", "1.1.256", "1.1.1x", "0.0.0", "-1.1.1"}) {
+    std::string error;
+    const auto cfg =
+        parse_env({{"KNX_TRANSPORT", "ip-routing"}, {"KNX_IP_INDIVIDUAL_ADDR", value}}, error);
+    EXPECT_FALSE(cfg.has_value()) << "accepted '" << value << "'";
+    EXPECT_NE(error.find("KNX_IP_INDIVIDUAL_ADDR"), std::string::npos) << error;
+  }
+}
+
+TEST(BusConfigTest, IndividualAddressAcceptsBoundaryValues) {
+  for (const auto& [text, expected] : std::vector<std::pair<const char*, std::uint16_t>>{
+           {"0.0.1", 0x0001}, {"15.15.255", 0xFFFF}, {"1.1.1", 0x1101}}) {
+    std::string error;
+    const auto cfg =
+        parse_env({{"KNX_TRANSPORT", "ip-routing"}, {"KNX_IP_INDIVIDUAL_ADDR", text}}, error);
+    ASSERT_TRUE(cfg.has_value()) << text << ": " << error;
+    EXPECT_EQ(cfg->ip_individual_addr, expected) << text;
+  }
 }
 
 TEST(BusConfigTest, IpRoutingParsesMulticastAndInterface) {

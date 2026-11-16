@@ -51,7 +51,9 @@ jobs:
             g++ \
             clang \
             libfcgi-dev \
-            knxd-dev
+            knxd-dev \
+            knxd \
+            knxd-tools
 
       - name: Configure (Debug)
         run: |
@@ -70,7 +72,9 @@ jobs:
         # --timeout bounds every single test: a hanging test (e.g. a leaked
         # worker holding ctest's output pipe) must fail the job within
         # seconds instead of blocking the workflow.
-        run: ctest --test-dir ${{ env.BUILD_DIR }} --output-on-failure --timeout 120
+        # knxd/knxtool are installed, so the black-box interop suites drive a
+        # real KNXnet/IP router and tunnel server (see tests/e2e).
+        run: ctest --test-dir ${{ env.BUILD_DIR }} --output-on-failure --timeout 300
 
       - name: Configure (Release)
         run: |
@@ -86,7 +90,7 @@ jobs:
         run: cmake --build ${{ env.BUILD_DIR }}_release -j$(nproc)
 
       - name: Run tests (Release)
-        run: ctest --test-dir ${{ env.BUILD_DIR }}_release --output-on-failure --timeout 120
+        run: ctest --test-dir ${{ env.BUILD_DIR }}_release --output-on-failure --timeout 300
 
   no-knxd:
     # The KNXnet/IP transports must build and work without any knxd dependency.

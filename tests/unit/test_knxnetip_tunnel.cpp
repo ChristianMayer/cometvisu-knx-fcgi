@@ -161,13 +161,14 @@ TEST(TunnelingBusLinkTest, ConnectSendsConnectRequestAndParsesChannel) {
 
   Bytes request;
   ASSERT_TRUE(router.receive(request));
-  EXPECT_EQ(request.size(), 25U);
+  EXPECT_EQ(request.size(), 26U);
   const auto frame = knxnetip::parse_frame(request);
   ASSERT_TRUE(frame.has_value());
   EXPECT_EQ(frame->service, ServiceType::ConnectRequest);
-  EXPECT_EQ(request[22], 0x04);  // connection type tunnelling
-  EXPECT_EQ(request[23], 0x02);  // KNX layer: link layer
-  EXPECT_EQ(request[24], 0x00);  // reserved
+  EXPECT_EQ(request[22], 0x04);  // CRI structure length
+  EXPECT_EQ(request[23], 0x04);  // connection type tunnelling
+  EXPECT_EQ(request[24], 0x02);  // KNX layer: link layer
+  EXPECT_EQ(request[25], 0x00);  // reserved
 
   router.reply(ConnectResponse(kChannel, 0x00, 0x1101));
   connect_thread.join();
@@ -659,6 +660,96 @@ TEST(TunnelingBusLinkTest, HealthyHeartbeatResponseKeepsTheTunnel) {
 
   router.reply(ConnectionStateResponse(kChannel, 0x00));
   EXPECT_EQ(link.wait_for_activity(150), BusLink::WaitResult::Timeout);
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, UnansweredHeartbeatEndsTheTunnel) {
+  // A device that disappears (power loss, network drop) never answers the
+  // heartbeat.  The link must not look healthy forever: without this the cache
+  // reader waits on a dead socket and /r never reports the outage.
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  // Two seconds between heartbeats, one second state timeout: the state
+  // deadline is the shorter slice the wait has to honour.
+  options.heartbeat_sec = 2;
+  options.ack_timeout_ms = 100;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  // The first wait reaches the heartbeat deadline and sends the request.
+  EXPECT_EQ(link.wait_for_activity(2500), BusLink::WaitResult::Timeout);
+  Bytes heartbeat;
+  ASSERT_TRUE(router.receive(heartbeat));
+
+  // Nobody answers: within a few timer slices the state deadline expires and
+  // the tunnel is reported dead (the exact wake-up may land one poll slice
+  // before the deadline, hence the loop).
+  BusLink::WaitResult result = BusLink::WaitResult::Timeout;
+  for (int attempt = 0; attempt < 5 && result != BusLink::WaitResult::Error; ++attempt) {
+    result = link.wait_for_activity(2000);
+  }
+  EXPECT_EQ(result, BusLink::WaitResult::Error);
+  EXPECT_FALSE(link.is_connected());
+  EXPECT_EQ(link.wait_for_activity(1), BusLink::WaitResult::Error);
+
+  // A fresh session works again.
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+  EXPECT_TRUE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, WaitDetectsALostTunnelThroughMaintain) {
+  // Same situation, but the deadline expires while the caller is *not* inside
+  // wait_for_activity: the check runs first, before a new heartbeat is armed.
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.heartbeat_sec = 1;
+  options.ack_timeout_ms = 100;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  ASSERT_EQ(link.wait_for_activity(1000), BusLink::WaitResult::Timeout);  // sends it
+  Bytes heartbeat;
+  ASSERT_TRUE(router.receive(heartbeat));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  EXPECT_EQ(link.wait_for_activity(1), BusLink::WaitResult::Error);
+  EXPECT_FALSE(link.is_connected());
+
+  // maintain() must stay a no-op on a lost tunnel.
+  link.maintain();
+  EXPECT_FALSE(link.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, MaintainIsANoOpWithoutAConnection) {
+  TunnelingBusLink link(LoopbackOptions(3671));
+  link.maintain();  // no socket yet
+  EXPECT_FALSE(link.is_connected());
+
+  FakeRouter router;
+  TunnelingBusLink connected(LoopbackOptions(router.port()));
+  ASSERT_TRUE(ConnectWithRouter(connected, router));
+  connected.disconnect();
+  connected.maintain();  // socket closed
+  EXPECT_FALSE(connected.is_connected());
+}
+
+TEST(TunnelingBusLinkTest, AnyTelegramProvesThatTheDeviceIsAlive) {
+  // A device that is busy sending bus traffic is alive even when the
+  // CONNECTIONSTATE_RESPONSE is lost.
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.heartbeat_sec = 1;
+  options.ack_timeout_ms = 100;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  EXPECT_EQ(link.wait_for_activity(1000), BusLink::WaitResult::Timeout);
+  Bytes heartbeat;
+  ASSERT_TRUE(router.receive(heartbeat));
+
+  router.reply(
+      knxnetip::build_tunnelling_request(kChannel, 0, IndicationCemi(0x0A03, {0x00, 0x80, 0x01})));
+  EXPECT_EQ(link.wait_for_activity(500), BusLink::WaitResult::GroupData);
   EXPECT_TRUE(link.is_connected());
 }
 

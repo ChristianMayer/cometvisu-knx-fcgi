@@ -194,6 +194,7 @@ std::vector<std::uint8_t> build_connect_request(const Hpai& control, const Hpai&
   std::vector<std::uint8_t> body = encode_hpai(control);
   const auto data_hpai = encode_hpai(data);
   body.insert(body.end(), data_hpai.begin(), data_hpai.end());
+  body.push_back(kCriLength);
   body.push_back(kConnectionTypeTunnel);
   body.push_back(kKnxLayerLink);
   body.push_back(0x00);  // reserved
@@ -285,13 +286,10 @@ std::optional<TunnellingRequest> parse_tunnelling_request(const std::vector<std:
 
 std::vector<std::uint8_t> build_tunnelling_ack(std::uint8_t channel, std::uint8_t sequence,
                                                std::uint8_t status) {
-  std::vector<std::uint8_t> body;
-  body.push_back(0x04);
-  body.push_back(channel);
-  body.push_back(sequence);
-  body.push_back(kStructuringNoMoreInfo);
-  body.push_back(status);
-  return build_frame(ServiceType::TunnellingAck, body);
+  // 0x04 = structure length: length, channel, sequence, status.  Unlike the
+  // request there is no reserved byte — the status takes its place, which is
+  // what knxd, Calimero and every real interface send.
+  return build_frame(ServiceType::TunnellingAck, {0x04, channel, sequence, status});
 }
 
 std::optional<TunnellingAck> parse_tunnelling_ack(const std::vector<std::uint8_t>& frame) {
@@ -303,10 +301,10 @@ std::optional<TunnellingAck> parse_tunnelling_ack(const std::vector<std::uint8_t
     return std::nullopt;
   }
   const auto& body = parsed->body;
-  if (body.size() < 5 || body[0] != 0x04) {
+  if (body.size() != 4 || body[0] != 0x04) {
     return std::nullopt;
   }
-  return TunnellingAck{body[1], body[2], body[4]};
+  return TunnellingAck{body[1], body[2], body[3]};
 }
 
 std::vector<std::uint8_t> build_routing_indication(const std::vector<std::uint8_t>& cemi) {

@@ -61,6 +61,11 @@ struct BusConfig {
   std::string ip_local_addr;
   /// `ip-routing`: multicast group.
   std::string ip_multicast = "224.0.23.12";
+  /// `ip-routing`: individual address used as the cEMI source.  A router
+  /// rejects a routing indication from 0.0.0, so a real address is required.
+  /// Default 15.15.250 (0xFFFA) — the last line of the address space, which is
+  /// practically never assigned by ETS.
+  std::uint16_t ip_individual_addr = 0xFFFA;
   /// `ip-routing`: interface for IP_MULTICAST_IF and the group join (empty = any).
   std::string ip_iface;
   /// `ip-tunnel`: NAT mode (accept NAT'd HPAIs, keep-alive).

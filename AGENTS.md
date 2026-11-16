@@ -227,17 +227,40 @@ actual file content (e.g., `#pragma once` or `#include`).
      connection but never answers must not block the caller.
    - **ip-routing** (`RoutingBusLink`): one UDP socket, joined to
      `KNX_IP_MULTICAST`, TTL 16, loop enabled.  Stateless: no ACKs, no
-     heartbeat.  Own echoes come back as `L_Data.req` and are dropped by the
-     cEMI codec.
+     heartbeat, no outage detection (a disappeared router is undetectable —
+     `/r` therefore never invents a `"bus"` outage for this transport).
+     **Every participant on the IP backbone acts as a router**, so a write is
+     a `ROUTING_INDICATION` (service `0x0530`) carrying `L_Data.ind` (`0x29`)
+     with `KNX_IP_INDIVIDUAL_ADDR` as the source (default `15.15.250`) — an
+     `L_Data.req` or a `0.0.0` source is silently dropped by knxd and by real
+     interfaces.  Our own frame comes back through the multicast loop and is
+     the bus echo of the write: it is pushed exactly once, which is what
+     announces the value to the other clients.  The outgoing interface is
+     selected by its IPv4 address (not its index) so the source address is
+     deterministic.
    - **ip-tunnel** (`TunnelingBusLink`): CONNECT / CONNECTIONSTATE /
      DISCONNECT, one sequence counter, every inbound request ACKed,
      out-of-sequence frames ACKed **and discarded** (a duplicate toggle would
      switch twice), retransmission with the *same* sequence on a missing ACK,
      heartbeat every `KNX_IP_HEARTBEAT_SEC` (devices drop a tunnel after 120 s
-     of silence).
+     of silence).  The heartbeat is sent from `maintain()`, which the cache
+     reader calls every loop iteration — it polls the raw fds itself and would
+     otherwise never reach the transport's timer.  An unanswered
+     `CONNECTIONSTATE_REQUEST` marks the tunnel lost, so `/r` reports the
+     outage instead of freezing.
+   - **KNXnet/IP service codes are fixed by the standard** (03_08_01 5.*):
+     tunnelling is `0x0420`/`0x0421`, routing is `0x0530`/`0x0531`/`0x0532`,
+     device configuration is `0x0310`/`0x0311`.  Wrong constants compile and
+     pass a symmetric unit test, but no real device answers — that is exactly
+     what the black-box suites exist for.  A `CONNECT_REQUEST` must carry the
+     CRI structure length (`0x04` as `body[size-16]`); a `TUNNELLING_ACK` is
+     four bytes (structure length, channel, sequence, status), the request five
+     (its reserved byte before the cEMI).
    - **cEMI trap**: only `L_Data.ind` (0x29) reaches the cache.  `L_Data.con`
      (0x2E) confirms *our own* write and must be dropped, otherwise every
-     write is delivered twice.
+     write is delivered twice.  `L_Data.req` is what a tunnelling client sends
+     (and what a device confirms with `.con`); a routing participant sends
+     `.ind`.
    - **Outage key**: `/r` and `/w` report `"knxd": {...}` for the knxd
      transport and `"bus": {...}` for the KNXnet/IP transports — same inner
      shape, key from `BusConfig::outage_key()`.
@@ -468,6 +491,46 @@ For transport-independent tests, `MockBusLink` in `mocks/mock_bus_link.h`
 provides a scriptable `BusLink` (connection failures, send failures, queued
 inbound telegrams).  ReadHandler tests do not need it: they push directly into
 the shared cache.
+
+### Black-box interoperability tests (the only thing that catches protocol bugs)
+
+A symmetric unit test proves that our encoder and our decoder agree — not that
+either matches the standard.  Every KNXnet/IP defect found so far (wrong
+service codes, a missing CRI length byte, a five-byte ACK, `L_Data.req` instead
+of `.ind` for routing, a heartbeat that was never sent) was invisible to the
+unit tests and fatal against a real peer.
+
+`tests/e2e/knxnetip_blackbox.{h,cpp}` provides the harness:
+
+| Piece | Purpose |
+|---|---|
+| `Knxd` | a supervised real `knxd`: `-b ip:<group>:<port>:<iface>` is a KNXnet/IP **router**, `-T -S <group>:<port>` a **tunnel server**; restart simulates an outage |
+| `Backend` | the deployed `cometvisu-knx-fcgi` binary as a child process with a direct FCGI socket and its own log |
+| `fcgi_request()` | a minimal FastCGI client (one connection per request, usable from `std::async` for long-polls) |
+| `RoutingMonitor` | a member of the routing group: records every `ROUTING_INDICATION` with source, TTL and cEMI, and injects telegrams from a *foreign* source port, exactly like another router |
+| `knxtool` calls | `groupswrite` injects on knxd's bus; `groupcacheread` is the independent witness that a write reached it |
+
+The two suites (`test_ip_routing_blackbox`, `test_ip_tunnel_blackbox`, label
+`blackbox`, 59 cases) cover login, cache reads, long-poll wake-up and latency,
+multi-byte and maximum-length values, per-address filtering, repeated identical
+telegrams, monotonic positions, multi-client delivery, "the write is not echoed
+twice", writes arriving on the bus, the wire format (service code, cEMI type,
+source address, TTL), outage reporting and reconnect, NAT/local-address options
+and concurrent long-polls.
+
+Rules for these tests:
+- they must skip (never fail) when `knxd`/`knxtool` are missing — the CI
+  `no-knxd` job and the coverage job run without them;
+- a test that asserts what the backend puts on the wire must assert the
+  *service code* and the *cEMI message code*, not just the payload;
+- knxd ignores datagrams from its own IP:port ("ignore multicast packets sent
+  by ourselves"), so a same-host test must give the backend a different source
+  address — hence `KNX_IP_IFACE=lo` on both sides (source `127.0.0.1` vs
+  knxd's `172.17.0.3`);
+- knxd accepts `-S` only as the *last* option group; the harness builds the
+  command line in that order;
+- give the backend several workers (`FCGI_WORKERS=4`): a blocked long-poll must
+  not be able to starve `/w`.
 
 ## Reference: Existing CometVisu Backend Implementations
 

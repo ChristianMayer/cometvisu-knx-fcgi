@@ -98,6 +98,27 @@ TEST(FrameNegative, TunnellingAckRejectsWrongServiceAndShortBody) {
   EXPECT_FALSE(parse_tunnelling_ack(too_short).has_value());
 }
 
+TEST(FrameNegative, TunnellingAckRejectsAFiveByteBody) {
+  // The request has a reserved byte before the cEMI; the ACK does not.  A
+  // device sends four bytes — a five byte body (the old, wrong layout) must be
+  // rejected instead of silently reading the status from the wrong offset.
+  const auto five_bytes = build_frame(ServiceType::TunnellingAck, {0x04, 0x01, 0x07, 0x00, 0x00});
+  EXPECT_FALSE(parse_tunnelling_ack(five_bytes).has_value());
+
+  // Right length, wrong structure length byte.
+  const auto wrong_structure = build_frame(ServiceType::TunnellingAck, {0x03, 0x01, 0x07, 0x00});
+  EXPECT_FALSE(parse_tunnelling_ack(wrong_structure).has_value());
+}
+
+TEST(FrameNegative, TunnellingAckAcceptsTheFourByteDeviceLayout) {
+  const auto ack = build_frame(ServiceType::TunnellingAck, {0x04, 0x21, 0x07, 0x00});
+  const auto parsed = parse_tunnelling_ack(ack);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->channel, 0x21);
+  EXPECT_EQ(parsed->sequence, 0x07);
+  EXPECT_EQ(parsed->status, 0x00);
+}
+
 TEST(FrameNegative, RoutingIndicationRejectsWrongServiceAndEmptyBody) {
   const auto empty = build_frame(ServiceType::RoutingIndication, {});
   EXPECT_FALSE(parse_routing_indication(empty).has_value());

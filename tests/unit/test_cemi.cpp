@@ -52,6 +52,31 @@ TEST(CemiTest, EncodeGroupValueRead) {
 
 TEST(CemiTest, EncodeEmptyApduRejected) {
   EXPECT_TRUE(encode_group_request(0x1101, 0x0A03, {}).empty());
+  EXPECT_TRUE(encode_group_indication(0x1101, 0x0A03, {}).empty());
+}
+
+TEST(CemiTest, EncodeGroupIndicationOneByte) {
+  // Routing participants send indications: the message code is 0x29.
+  const auto frame = encode_group_indication(0xFFFA, 0x0A03, {0x00, 0x80, 0x42});
+  const Bytes expected = {0x29, 0x00, 0xBC, 0xE0, 0xFF, 0xFA, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
+  EXPECT_EQ(frame, expected);
+}
+
+TEST(CemiTest, EncodeGroupIndicationTwoBytes) {
+  const auto frame = encode_group_indication(0x1101, 0x0A03, {0x00, 0x80, 0x0C, 0x6F});
+  ASSERT_EQ(frame.size(), 13U);
+  EXPECT_EQ(frame[0], kMessageCodeLDataInd);
+  EXPECT_EQ(frame[8], 0x03);  // length byte = APDU octets - 1
+  EXPECT_EQ(Bytes(frame.begin() + 9, frame.end()), (Bytes{0x00, 0x80, 0x0C, 0x6F}));
+}
+
+TEST(CemiTest, IndicationRoundTripsThroughTheParser) {
+  const auto frame = encode_group_indication(0x1101, 0x0A04, {0x00, 0x80, 0x01});
+  const auto parsed = parse_ldata_ind(frame);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->source, 0x1101);
+  EXPECT_EQ(parsed->destination, 0x0A04);
+  EXPECT_EQ(parsed->apdu, (Bytes{0x00, 0x80, 0x01}));
 }
 
 TEST(CemiTest, ParseLDataIndGroupWrite) {

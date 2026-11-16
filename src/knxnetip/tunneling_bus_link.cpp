@@ -183,6 +183,7 @@ bool TunnelingBusLink::connect() {
     tx_sequence_ = 0;
     rx_has_expected_ = false;
     ack_received_ = false;
+    state_pending_ = false;
     pending_.clear();
     heartbeat_due_ms_ = now_ms() + (static_cast<std::int64_t>(options_.heartbeat_sec) * 1000);
     std::cout << "[INFO] Tunnel established to " << label() << " (channel "
@@ -211,6 +212,7 @@ void TunnelingBusLink::disconnect() {
   connected_ = false;
   lost_ = false;
   channel_ = 0;
+  state_pending_ = false;
   pending_.clear();
 }
 
@@ -297,6 +299,8 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
   if (!frame) {
     return;  // unknown service types are ignored
   }
+  // Any frame from the device proves that it is alive.
+  state_pending_ = false;
 
   switch (frame->service) {
     case knxnetip::ServiceType::TunnellingRequest: {
@@ -417,7 +421,38 @@ void TunnelingBusLink::send_heartbeat_if_due() {
   const knxnetip::Hpai hpai{0U, 0U};
   (void)send_to_device(knxnetip::build_connectionstate_request(channel_, hpai));
 
+  // The device must answer; a silent device is a dead bus.
+  state_pending_ = true;
+  state_deadline_ms_ = current + std::max(2 * options_.ack_timeout_ms, 1000);
   heartbeat_due_ms_ = current + (static_cast<std::int64_t>(options_.heartbeat_sec) * 1000);
+}
+
+void TunnelingBusLink::maintain() {
+  // A lost tunnel keeps its socket but must not send anything any more; a
+  // closed socket has nothing to maintain.  (connected_ can never be false here
+  // while fd_ is open and the tunnel is not lost — disconnect() closes both.)
+  if (fd_ < 0 || lost_) {
+    return;
+  }
+  if (heartbeat_expired()) {
+    std::cerr << "[WARN] " << label() << ": no CONNECTIONSTATE_RESPONSE — reconnecting\n";
+    return;
+  }
+  send_heartbeat_if_due();
+}
+
+bool TunnelingBusLink::heartbeat_expired() {
+  /// Timer granularity: a poll that returned at the deadline can be a moment
+  /// early, so expiry allows a couple of milliseconds of slack.
+  constexpr std::int64_t kExpirySlackMs = 2;
+  if (!state_pending_) {
+    return false;
+  }
+  if (now_ms() + kExpirySlackMs < state_deadline_ms_) {
+    return false;
+  }
+  lost_ = true;
+  return true;
 }
 
 BusLink::WaitResult TunnelingBusLink::wait_for_activity(int timeout_ms) {
@@ -427,16 +462,27 @@ BusLink::WaitResult TunnelingBusLink::wait_for_activity(int timeout_ms) {
   if (lost_) {
     return WaitResult::Error;
   }
-  send_heartbeat_if_due();
+
+  // Heartbeat bookkeeping (and a missed-heartbeat check) before blocking.
+  maintain();
+  if (lost_) {
+    return WaitResult::Error;
+  }
 
   // Never block past the next heartbeat: the tunnel dies after 120 s without
-  // traffic on the device side.
+  // traffic on the device side.  Also never block past the state deadline.
   std::int64_t slice = timeout_ms;
   if (connected_) {  // GCOV_EXCL_BR_LINE - wait_for_activity() is only used while connected, so the
                      // else-arm is unreachable
     const std::int64_t until_heartbeat = heartbeat_due_ms_ - now_ms();
     if (until_heartbeat < slice) {
       slice = until_heartbeat;
+    }
+  }
+  if (state_pending_) {
+    const std::int64_t until_state = state_deadline_ms_ - now_ms();
+    if (until_state < slice) {
+      slice = until_state;
     }
   }
   if (slice < 0) {
@@ -451,13 +497,18 @@ BusLink::WaitResult TunnelingBusLink::wait_for_activity(int timeout_ms) {
     return errno == EINTR ? WaitResult::Timeout : WaitResult::Error;  // GCOV_EXCL_LINE
   }
   if (rc == 0) {
-    send_heartbeat_if_due();  // the timer expired during the wait
+    maintain();  // the timer expired during the wait
+    if (lost_) {
+      return WaitResult::Error;
+    }
     return WaitResult::Timeout;
   }
   if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {  // GCOV_EXCL_BR_LINE
     return WaitResult::Error;                                 // GCOV_EXCL_LINE
   }
   if ((pfd.revents & POLLIN) != 0) {  // GCOV_EXCL_BR_LINE - poll() only reports POLLIN here
+    // Anything the device sends proves that it is alive; process() clears the
+    // pending heartbeat for every frame it accepts.
     (void)receive_and_process(0);
     if (lost_) {
       return WaitResult::Error;

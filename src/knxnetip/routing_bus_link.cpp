@@ -25,12 +25,14 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 #include "knxnetip/cemi.h"
@@ -42,6 +44,29 @@ namespace {
 constexpr std::uint8_t kMulticastTtl = 16;
 constexpr int kReceiveBufferBytes = 2048;
 
+/// IPv4 address of a network interface (host byte order).
+/// @return std::nullopt when the interface does not exist or has no IPv4
+///         address — both make it unusable for KNXnet/IP.
+std::optional<std::uint32_t> interface_ipv4(const std::string& name) {
+  const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  // GCOV_EXCL_START - socket() only fails on fd exhaustion
+  if (fd < 0) {
+    return std::nullopt;
+  }
+  // GCOV_EXCL_STOP
+  struct ifreq request {};
+  std::strncpy(request.ifr_name, name.c_str(), IFNAMSIZ - 1);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  const bool known = ::ioctl(fd, SIOCGIFADDR, &request) == 0;
+  ::close(fd);
+  if (!known) {
+    return std::nullopt;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  const auto* address = reinterpret_cast<const struct sockaddr_in*>(&request.ifr_addr);
+  return ntohl(address->sin_addr.s_addr);
+}
+
 }  // namespace
 
 RoutingOptions RoutingOptions::from_config(const BusConfig& config) {
@@ -49,6 +74,7 @@ RoutingOptions RoutingOptions::from_config(const BusConfig& config) {
   options.address = config.ip_multicast;
   options.port = config.ip_port;
   options.iface = config.ip_iface;
+  options.source_address = config.ip_individual_addr;
   options.bind_port = config.ip_port;
   return options;
 }  // GCOV_EXCL_LINE - closing brace, no statement
@@ -101,20 +127,23 @@ bool RoutingBusLink::connect() {
   // Join the group only for a real multicast address.  A unicast address is
   // the documented loopback/test mode (no join is possible there).  The
   // address is in host byte order, which is what IN_MULTICAST() expects.
+  std::optional<std::uint32_t> interface_address;
+  if (!options_.iface.empty()) {
+    interface_address = interface_ipv4(options_.iface);
+    if (!interface_address) {
+      std::cerr << "[ERROR] Unknown KNX_IP_IFACE '" << options_.iface
+                << "' (or the interface has no IPv4 address)\n";
+      disconnect();
+      return false;
+    }
+  }
+
   const std::uint32_t host_address = *address;
   if (IN_MULTICAST(host_address)) {
     struct ip_mreqn membership {};
     membership.imr_multiaddr.s_addr = htonl(host_address);
-    membership.imr_address.s_addr = htonl(INADDR_ANY);
-    if (!options_.iface.empty()) {
-      const unsigned index = ::if_nametoindex(options_.iface.c_str());
-      if (index == 0) {
-        std::cerr << "[ERROR] Unknown KNX_IP_IFACE '" << options_.iface << "'\n";
-        disconnect();
-        return false;
-      }
-      membership.imr_ifindex = static_cast<int>(index);
-    }
+    membership.imr_address.s_addr =
+        interface_address ? htonl(*interface_address) : htonl(INADDR_ANY);
     // A kernel that refuses the join is a host configuration problem that
     // cannot be injected from a test process.
     const bool joined =
@@ -129,18 +158,21 @@ bool RoutingBusLink::connect() {
     // GCOV_EXCL_STOP
   }
 
-  const int interface_index =
-      options_.iface.empty() ? 0 : static_cast<int>(::if_nametoindex(options_.iface.c_str()));
-  if (interface_index != 0) {
-    struct ip_mreqn iface_request {};
-    iface_request.imr_ifindex = interface_index;
-    (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &iface_request, sizeof(iface_request));
+  // Select the outgoing interface by its address.  An ip_mreqn that carries
+  // only an interface index leaves the source address to the routing table,
+  // which on a multi-homed host (and when another KNXnet/IP participant runs
+  // on the same host) is the wrong one.
+  if (interface_address) {
+    struct in_addr outgoing {};
+    outgoing.s_addr = htonl(*interface_address);
+    (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &outgoing, sizeof(outgoing));
   }
 
   unsigned char ttl = kMulticastTtl;
   (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-  // Loop enabled: a local router (or knxd in ip: mode) must see our frames and
-  // the interop smoke test relies on it.  Echoes are dropped by the codec.
+  // Loop enabled: a local router (or knxd in ip: mode) must see our frames,
+  // and our own frame coming back is the bus echo of the write (see the class
+  // comment).
   unsigned char loop = 1;
   (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
 
@@ -167,7 +199,7 @@ bool RoutingBusLink::send_group_packet(std::uint16_t group_addr,
     return false;  // GCOV_EXCL_LINE
   }
 
-  const auto cemi = cemi::encode_group_request(0x0000, group_addr, apdu);
+  const auto cemi = cemi::encode_group_indication(options_.source_address, group_addr, apdu);
   if (cemi.empty()) {
     return false;
   }
@@ -210,7 +242,7 @@ bool RoutingBusLink::poll_group_telegram(std::uint16_t& out_group_addr,
     }
     const auto frame = cemi::parse_ldata_ind(*cemi_payload);
     if (!frame) {
-      continue;  // L_Data.req (our own echo), L_Data.con, individual traffic
+      continue;  // L_Data.req / L_Data.con / individual traffic
     }
     out_group_addr = frame->destination;
     out_apdu = frame->apdu;

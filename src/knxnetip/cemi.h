@@ -38,6 +38,14 @@
  * Only L_Data.ind reaches the cache.  L_Data.con confirms *our own* write and
  * must be dropped, otherwise every write would be delivered twice (AGENTS.md
  * rule 1).
+ *
+ * Which message code a *write* uses depends on the transport:
+ *   - `ip-tunnel` sends L_Data.req (0x11): the client asks the interface to
+ *     transfer the frame, and the interface confirms with L_Data.con;
+ *   - `ip-routing` sends L_Data.ind (0x29): on the IP backbone every
+ *     participant acts as a router, and routers only accept indications.
+ *     A ROUTING_INDICATION carrying L_Data.req is silently dropped by knxd
+ *     and by real interfaces, so the write would never reach the bus.
  */
 
 #pragma once
@@ -64,7 +72,7 @@ struct CemiFrame {
   std::vector<std::uint8_t> apdu;  ///< TPCI/APCI + data
 };
 
-/// Encode an L_Data.req for a group value.
+/// Encode an L_Data.req for a group value (tunnelling clients).
 /// @param source Individual address (0x0000 = let the device fill it in).
 /// @param destination 16-bit group address.
 /// @param apdu TPCI/APCI + data (at least one byte).
@@ -73,6 +81,15 @@ struct CemiFrame {
 [[nodiscard]] std::vector<std::uint8_t> encode_group_request(std::uint16_t source,
                                                              std::uint16_t destination,
                                                              const std::vector<std::uint8_t>& apdu);
+
+/// Encode an L_Data.ind for a group value (routing participants).
+///
+/// The source must be a valid individual address: a KNXnet/IP router rejects
+/// a frame from 0.0.0, and a source that belongs to one of its own tunnel
+/// clients (knxd does this) as well.
+/// @return the cEMI frame, or an empty vector when @p apdu is empty.
+[[nodiscard]] std::vector<std::uint8_t> encode_group_indication(
+    std::uint16_t source, std::uint16_t destination, const std::vector<std::uint8_t>& apdu);
 
 /// Parse an L_Data.ind with a group destination.
 /// @return the frame, or std::nullopt for any other message code, a truncated

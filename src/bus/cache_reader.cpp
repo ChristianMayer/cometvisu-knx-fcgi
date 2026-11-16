@@ -282,7 +282,17 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
     // ---------------- Wait for activity ----------------
     // While a backlog remains, poll with a zero timeout: that services inbound
     // telegrams between two write batches instead of starving them.
-    auto activity = detail::wait_for_activity(link, tx_queue, backlog ? 0 : wait_timeout_ms);
+    //
+    // maintain() runs before every wait: this loop polls the raw fds, so a
+    // transport that needs keep-alive traffic (KNXnet/IP tunnelling) would
+    // otherwise never send its heartbeat.
+    link.maintain();
+    Activity activity = Activity::Timeout;
+    if (!link.is_connected()) {
+      activity = Activity::Error;
+    } else {
+      activity = detail::wait_for_activity(link, tx_queue, backlog ? 0 : wait_timeout_ms);
+    }
     if (activity == Activity::Tx) {
       continue;  // a worker queued a telegram — send it right away
     }

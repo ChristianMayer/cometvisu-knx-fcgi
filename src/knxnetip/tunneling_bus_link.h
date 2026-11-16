@@ -79,6 +79,7 @@ public:
   [[nodiscard]] std::uint64_t get_telegram_count() const override { return telegram_count_; }
   void set_nonblocking(bool enable) override;
   [[nodiscard]] WaitResult wait_for_activity(int timeout_ms) override;
+  void maintain() override;
   [[nodiscard]] std::string label() const override;
 
   // ---- diagnostics / tests ----
@@ -92,6 +93,8 @@ private:
   void process(const std::vector<std::uint8_t>& datagram);
   /// Send a CONNECTIONSTATE_REQUEST when the heartbeat interval has elapsed.
   void send_heartbeat_if_due();
+  /// True when an unanswered heartbeat expired (marks the tunnel lost).
+  [[nodiscard]] bool heartbeat_expired();
   /// Send a datagram to the configured device (the socket is not connected,
   /// so send() alone would fail with ENOTCONN).
   bool send_to_device(const std::vector<std::uint8_t>& datagram);
@@ -108,6 +111,12 @@ private:
   bool rx_has_expected_ = false;
   std::uint8_t ack_wait_sequence_ = 0;
   bool ack_received_ = false;
+
+  /// A CONNECTIONSTATE_REQUEST is outstanding.  A device that never answers it
+  /// is gone: without this the tunnel would look healthy forever while the bus
+  /// is dead, and /r would keep the client on frozen values (AGENTS.md 9).
+  bool state_pending_ = false;
+  std::int64_t state_deadline_ms_ = 0;
 
   std::int64_t heartbeat_due_ms_ = 0;
   std::uint64_t telegram_count_ = 0;

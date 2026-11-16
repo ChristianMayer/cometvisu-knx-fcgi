@@ -86,6 +86,15 @@ public:
   /// Block until data arrives or the timeout expires.  Zero CPU (poll()).
   [[nodiscard]] virtual WaitResult wait_for_activity(int timeout_ms) = 0;
 
+  /// Periodic bookkeeping that has to happen even when the caller polls the
+  /// raw fds itself (the cache reader polls the link fd and the TX eventfd
+  /// together).  Must be called at least once per second while connected.
+  ///
+  /// Only transports with keep-alive traffic need this: KNXnet/IP tunnelling
+  /// sends its CONNECTIONSTATE_REQUEST here and ends a tunnel whose heartbeat
+  /// is not answered.  The default is a no-op.
+  virtual void maintain() {}
+
   /// Human readable target for log lines, e.g. "knxd at /run/knx".
   [[nodiscard]] virtual std::string label() const = 0;
 };

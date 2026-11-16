@@ -36,7 +36,7 @@ const Hpai kAnyHost{0U, 0U};             // 0.0.0.0:0
 TEST(KnxnetIpFrameTest, HeaderRoundTripForEveryService) {
   const Bytes body = {0x01, 0x02, 0x03};
   for (const unsigned raw : {0x0201U, 0x0202U, 0x0203U, 0x0204U, 0x0205U, 0x0206U, 0x0207U, 0x0208U,
-                             0x0209U, 0x020AU, 0x0320U, 0x0321U, 0x0330U, 0x0331U, 0x0332U}) {
+                             0x0209U, 0x020AU, 0x0420U, 0x0421U, 0x0530U, 0x0531U, 0x0532U}) {
     const auto service = static_cast<ServiceType>(static_cast<std::uint16_t>(raw));
     const auto frame = build_frame(service, body);
     ASSERT_EQ(frame.size(), 6U + body.size());
@@ -47,6 +47,17 @@ TEST(KnxnetIpFrameTest, HeaderRoundTripForEveryService) {
     EXPECT_EQ(static_cast<unsigned>(parsed->service), raw);
     EXPECT_EQ(parsed->body, body);
   }
+}
+
+TEST(KnxnetIpFrameTest, RoutingServicesUseTheDocumentedCodes) {
+  // KNXnet/IP 03_08_01 5.*: tunnelling is 0x042x, routing is 0x053x.  Real
+  // devices drop a frame with any other service code, so these must never
+  // drift again.
+  EXPECT_EQ(static_cast<unsigned>(ServiceType::TunnellingRequest), 0x0420U);
+  EXPECT_EQ(static_cast<unsigned>(ServiceType::TunnellingAck), 0x0421U);
+  EXPECT_EQ(static_cast<unsigned>(ServiceType::RoutingIndication), 0x0530U);
+  EXPECT_EQ(static_cast<unsigned>(ServiceType::RoutingLostMessage), 0x0531U);
+  EXPECT_EQ(static_cast<unsigned>(ServiceType::RoutingBusy), 0x0532U);
 }
 
 TEST(KnxnetIpFrameTest, RejectsWrongHeaderLength) {
@@ -110,11 +121,24 @@ TEST(KnxnetIpFrameTest, IPv4Helpers) {
 
 TEST(KnxnetIpFrameTest, ConnectRequestBytes) {
   const auto frame = build_connect_request(kControl, kAnyHost);
-  const Bytes expected = {0x06, 0x10, 0x02, 0x05, 0x00, 0x19,              // header, 25 bytes
+  const Bytes expected = {0x06, 0x10, 0x02, 0x05, 0x00, 0x1A,              // header, 26 bytes
                           0x08, 0x01, 0xC0, 0xA8, 0x01, 0x14, 0x0E, 0x57,  // HPAI control
                           0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // HPAI data
-                          0x04, 0x02, 0x00};                               // tunnel, link layer
+                          0x04,                                            // CRI length
+                          0x04, 0x02, 0x00};  // tunnel, link layer, reserved
   EXPECT_EQ(frame, expected);
+}
+
+TEST(KnxnetIpFrameTest, ConnectRequestCriLengthMatchesTheBody) {
+  // A device validates CRI[0] == body.size() - 16 and silently drops the
+  // request otherwise (knxd: parseEIBnet_ConnectRequest).
+  const auto frame = build_connect_request(kControl, kAnyHost);
+  ASSERT_GE(frame.size(), 26U);
+  const std::uint8_t cri_length = frame[22];
+  EXPECT_EQ(cri_length, frame.size() - 6U - 16U) << "CRI[0] == body size - 16";
+  EXPECT_EQ(cri_length, kCriLength);
+  EXPECT_EQ(frame[23], kConnectionTypeTunnel);
+  EXPECT_EQ(frame[24], kKnxLayerLink);
 }
 
 TEST(KnxnetIpFrameTest, ParseConnectResponseOk) {
@@ -173,6 +197,7 @@ TEST(KnxnetIpFrameTest, TunnellingRequestBytes) {
   const Bytes cemi = {0x11, 0x00, 0xBC, 0xE0, 0x00, 0x00, 0x0A, 0x03, 0x02, 0x00, 0x80, 0x42};
   const auto frame = build_tunnelling_request(0x01, 0x07, cemi);
   ASSERT_EQ(frame.size(), 10U + cemi.size());
+  EXPECT_EQ(frame[2], 0x04);  // service type 0x0420 (tunnelling)
   EXPECT_EQ(frame[3], 0x20);
   EXPECT_EQ(frame[6], 0x04);  // structure length
   EXPECT_EQ(frame[7], 0x01);  // channel
@@ -188,8 +213,8 @@ TEST(KnxnetIpFrameTest, TunnellingRequestBytes) {
 
 TEST(KnxnetIpFrameTest, TunnellingAckBytes) {
   const auto frame = build_tunnelling_ack(0x01, 0x07);
-  ASSERT_EQ(frame.size(), 11U);
-  const Bytes expected = {0x06, 0x10, 0x03, 0x21, 0x00, 0x0B, 0x04, 0x01, 0x07, 0x00, 0x00};
+  ASSERT_EQ(frame.size(), 10U);
+  const Bytes expected = {0x06, 0x10, 0x04, 0x21, 0x00, 0x0A, 0x04, 0x01, 0x07, 0x00};
   EXPECT_EQ(frame, expected);
 
   const auto parsed = parse_tunnelling_ack(frame);

@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "../../src/knxnetip/cemi.h"
@@ -115,9 +116,97 @@ TEST(RoutingBusLinkTest, SendsRoutingIndicationWithCemi) {
   ASSERT_TRUE(link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
 
   const auto received = peer.receive();
+  // A routing participant is a router: the cEMI must be an L_Data.ind with its
+  // own individual address.  An L_Data.req is dropped by every real router.
   const Bytes expected = knxnetip::build_routing_indication(
-      cemi::encode_group_request(0x0000, 0x0A03, {0x00, 0x80, 0x42}));
+      cemi::encode_group_indication(0xFFFA, 0x0A03, {0x00, 0x80, 0x42}));
   EXPECT_EQ(received, expected);
+  ASSERT_FALSE(received.empty());
+  EXPECT_EQ(received[6], cemi::kMessageCodeLDataInd);
+  EXPECT_EQ(received[10], 0xFF);  // source 15.15.250 -> 0xFFFA
+  EXPECT_EQ(received[11], 0xFA);
+}
+
+TEST(RoutingBusLinkTest, UsesTheConfiguredSourceAddress) {
+  UdpPeer peer;
+  RoutingOptions options = LoopbackOptions(peer.port());
+  options.source_address = 0x11F0;  // 1.1.240
+  RoutingBusLink link(options);
+  ASSERT_TRUE(link.connect());
+
+  ASSERT_TRUE(link.send_group_packet(0x0A04, {0x00, 0x80, 0x01}));
+
+  const auto received = peer.receive();
+  ASSERT_GE(received.size(), 12U);
+  EXPECT_EQ(received[10], 0x11);
+  EXPECT_EQ(received[11], 0xF0);
+}
+
+TEST(RoutingBusLinkTest, FromConfigTakesTheIndividualAddress) {
+  BusConfig config;
+  config.transport = BusTransport::IpRouting;
+  config.ip_multicast = "239.255.1.2";
+  config.ip_port = 1234;
+  config.ip_individual_addr = 0x11F0;
+  const RoutingOptions options = RoutingOptions::from_config(config);
+  EXPECT_EQ(options.address, "239.255.1.2");
+  EXPECT_EQ(options.port, 1234);
+  EXPECT_EQ(options.bind_port, 1234);
+  EXPECT_EQ(options.source_address, 0x11F0);
+}
+
+TEST(RoutingBusLinkTest, FramesLeaveThroughTheConfiguredInterface) {
+  // The outgoing interface must be selected by its *address*, not by its
+  // index: an ip_mreqn with only an index lets the routing table pick the
+  // source address, which is wrong when several KNXnet/IP participants share
+  // a host.  A group member on "lo" sees the frame only with source 127.0.0.1.
+  const std::string group = "239.255.99.222";
+  const int receiver = ::socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_GE(receiver, 0);
+  int enable = 1;
+  (void)::setsockopt(receiver, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+  struct sockaddr_in bind_address {};
+  bind_address.sin_family = AF_INET;
+  bind_address.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind_address.sin_port = 0;
+  ASSERT_EQ(
+      ::bind(receiver, reinterpret_cast<struct sockaddr*>(&bind_address), sizeof(bind_address)), 0);
+  socklen_t length = sizeof(bind_address);
+  ASSERT_EQ(::getsockname(receiver, reinterpret_cast<struct sockaddr*>(&bind_address), &length), 0);
+  const std::uint16_t port = ntohs(bind_address.sin_port);
+  struct ip_mreqn membership {};
+  membership.imr_multiaddr.s_addr = ::inet_addr(group.c_str());
+  membership.imr_address.s_addr = ::inet_addr("127.0.0.1");
+  ASSERT_EQ(::setsockopt(receiver, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership)),
+            0);
+
+  RoutingOptions options;
+  options.address = group;
+  options.port = port;
+  options.bind_port = port;
+  options.iface = "lo";
+  RoutingBusLink link(options);
+  ASSERT_TRUE(link.connect());
+  ASSERT_TRUE(link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}));
+
+  struct sockaddr_in from {};
+  socklen_t from_len = sizeof(from);
+  std::uint8_t buffer[256] = {};
+  const ssize_t received = ::recvfrom(receiver, buffer, sizeof(buffer), 0,
+                                      reinterpret_cast<struct sockaddr*>(&from), &from_len);
+  EXPECT_GT(received, 0);
+  EXPECT_EQ(std::string{::inet_ntoa(from.sin_addr)}, "127.0.0.1");
+  EXPECT_EQ(ntohs(from.sin_port), port);
+  ::close(receiver);
+}
+
+TEST(RoutingBusLinkTest, UnknownInterfaceIsRejected) {
+  RoutingOptions options;
+  options.address = "239.255.99.223";
+  options.iface = "definitely-not-an-interface0";
+  RoutingBusLink link(options);
+  EXPECT_FALSE(link.connect());
+  EXPECT_FALSE(link.is_connected());
 }
 
 TEST(RoutingBusLinkTest, ReceivesRoutingIndication) {
@@ -136,9 +225,9 @@ TEST(RoutingBusLinkTest, ReceivesRoutingIndication) {
   EXPECT_EQ(link.get_telegram_count(), 1U);
 }
 
-TEST(RoutingBusLinkTest, IgnoresOwnEcho) {
-  // Our own frame comes back as L_Data.req (0x11) with multicast loop enabled;
-  // it must never be delivered a second time.
+TEST(RoutingBusLinkTest, IgnoresRequestFrames) {
+  // L_Data.req (0x11) is a *confirmation* path frame; only indications are bus
+  // traffic.  A frame that exists only as .req must not be delivered.
   UdpPeer peer;
   RoutingBusLink link(LoopbackOptions(peer.port()));
   ASSERT_TRUE(link.connect());

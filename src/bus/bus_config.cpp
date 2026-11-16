@@ -21,6 +21,7 @@
 #include "bus/bus_config.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <utility>
 
@@ -62,6 +63,23 @@ bool parse_bool(const std::string& text, bool& out) {
 std::string error_int(const char* name, const std::string& value, int min_val, int max_val) {
   return std::string{"invalid "} + name + " '" + value + "' (expected " + std::to_string(min_val) +
          ".." + std::to_string(max_val) + ")";
+}
+
+/// Parse an individual address `A.L.D` (0..15 . 0..15 . 1..255).
+/// The all-zero address is not a device address and is rejected.
+bool parse_individual_address(const std::string& text, std::uint16_t& out) {
+  unsigned area = 0;
+  unsigned line = 0;
+  unsigned device = 0;
+  char extra = 0;
+  if (std::sscanf(text.c_str(), "%u.%u.%u%c", &area, &line, &device, &extra) != 3) {
+    return false;
+  }
+  if (area > 15U || line > 15U || device == 0U || device > 255U) {
+    return false;
+  }
+  out = static_cast<std::uint16_t>(((area & 0x0FU) << 12) | ((line & 0x0FU) << 8) | device);
+  return out != 0;
 }
 
 }  // namespace
@@ -116,6 +134,9 @@ std::string BusConfig::describe() const {
       if (!ip_iface.empty()) {
         text += " iface=" + ip_iface;
       }
+      text += " addr=" + std::to_string((ip_individual_addr >> 12) & 0x0F) + "." +
+              std::to_string((ip_individual_addr >> 8) & 0x0F) + "." +
+              std::to_string(ip_individual_addr & 0xFF);
       break;
   }
   return text;
@@ -152,6 +173,12 @@ std::optional<BusConfig> BusConfig::parse(const EnvGetter& get, std::string& err
     cfg.ip_multicast = multicast;
   }
   cfg.ip_iface = get("KNX_IP_IFACE");
+
+  const std::string individual = get("KNX_IP_INDIVIDUAL_ADDR");
+  if (!individual.empty() && !parse_individual_address(individual, cfg.ip_individual_addr)) {
+    error = "invalid KNX_IP_INDIVIDUAL_ADDR '" + individual + "' (expected A.L.D, e.g. 15.15.250)";
+    return std::nullopt;
+  }
 
   const std::string port = get("KNX_IP_PORT");
   if (!port.empty()) {

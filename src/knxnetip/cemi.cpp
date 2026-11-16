@@ -26,17 +26,17 @@ namespace {
 /// Standard frame header length before the APDU.
 constexpr std::size_t kHeaderSize = 9;
 
-}  // namespace
-
-std::vector<std::uint8_t> encode_group_request(std::uint16_t source, std::uint16_t destination,
-                                               const std::vector<std::uint8_t>& apdu) {
+/// Encode a group-addressed L_Data frame with an explicit message code.
+std::vector<std::uint8_t> encode_group_frame(std::uint8_t message_code, std::uint16_t source,
+                                             std::uint16_t destination,
+                                             const std::vector<std::uint8_t>& apdu) {
   if (apdu.empty()) {
     return {};
   }
 
   std::vector<std::uint8_t> frame;
   frame.reserve(kHeaderSize + apdu.size());
-  frame.push_back(kMessageCodeLDataReq);
+  frame.push_back(message_code);
   frame.push_back(0x00);  // additional info length
   frame.push_back(kControl1Standard);
   frame.push_back(kControl2Group);
@@ -47,6 +47,18 @@ std::vector<std::uint8_t> encode_group_request(std::uint16_t source, std::uint16
   frame.push_back(static_cast<std::uint8_t>(apdu.size() - 1));
   frame.insert(frame.end(), apdu.begin(), apdu.end());
   return frame;
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> encode_group_request(std::uint16_t source, std::uint16_t destination,
+                                               const std::vector<std::uint8_t>& apdu) {
+  return encode_group_frame(kMessageCodeLDataReq, source, destination, apdu);
+}
+
+std::vector<std::uint8_t> encode_group_indication(std::uint16_t source, std::uint16_t destination,
+                                                  const std::vector<std::uint8_t>& apdu) {
+  return encode_group_frame(kMessageCodeLDataInd, source, destination, apdu);
 }
 
 std::optional<CemiFrame> parse_ldata_ind(const std::uint8_t* data, std::size_t size) {

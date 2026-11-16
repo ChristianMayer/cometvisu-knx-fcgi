@@ -51,6 +51,8 @@ inline constexpr std::uint16_t kDefaultPort = 3671;
 inline constexpr std::uint8_t kHostProtocolIpv4Udp = 0x01;
 inline constexpr std::uint8_t kConnectionTypeTunnel = 0x04;
 inline constexpr std::uint8_t kKnxLayerLink = 0x02;
+/// CRI structure length: length byte + connection type + KNX layer + reserved.
+inline constexpr std::uint8_t kCriLength = 0x04;
 inline constexpr std::uint8_t kStructuringNoMoreInfo = 0x00;
 
 enum class ServiceType : std::uint16_t {
@@ -64,11 +66,14 @@ enum class ServiceType : std::uint16_t {
   ConnectionStateResponse = 0x0208,
   DisconnectRequest = 0x0209,
   DisconnectResponse = 0x020A,
-  TunnellingRequest = 0x0320,
-  TunnellingAck = 0x0321,
-  RoutingIndication = 0x0330,
-  RoutingLostMessage = 0x0331,
-  RoutingBusy = 0x0332,
+  TunnellingRequest = 0x0420,
+  TunnellingAck = 0x0421,
+  // KNXnet/IP chapter 3/8: the routing services live in the 0x05xx range.
+  // 0x0330 is *not* ROUTING_INDICATION — a router silently drops a frame that
+  // uses it, which is why the value is called out here.
+  RoutingIndication = 0x0530,
+  RoutingLostMessage = 0x0531,
+  RoutingBusy = 0x0532,
 };
 
 /// CONNECT_RESPONSE status codes (subset that matters in practice).
@@ -125,7 +130,10 @@ struct Frame {
 
 // ---- Tunnelling connection management ----
 
-/// CONNECT_REQUEST: HPAI control | HPAI data | 0x04 (tunnel) | 0x02 (link layer) | 0x00
+/// CONNECT_REQUEST: HPAI control | HPAI data | CRI
+/// (`0x04` length, `0x04` tunnel, `0x02` link layer, `0x00` reserved).
+/// The length byte is mandatory: a device validates `body[16] == size - 16`
+/// and ignores a request without it.
 [[nodiscard]] std::vector<std::uint8_t> build_connect_request(const Hpai& control,
                                                               const Hpai& data);
 
@@ -173,6 +181,8 @@ struct TunnellingAck {
   std::uint8_t status = 0;
 };
 
+/// TUNNELLING_ACK body: `0x04` structure length | channel | sequence | status.
+/// (Unlike the request there is no reserved byte: the status takes its place.)
 [[nodiscard]] std::vector<std::uint8_t> build_tunnelling_ack(std::uint8_t channel,
                                                              std::uint8_t sequence,
                                                              std::uint8_t status = 0);

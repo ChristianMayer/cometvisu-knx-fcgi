@@ -39,9 +39,9 @@ CONNECTIONSTATE_REQUEST = 0x0207
 CONNECTIONSTATE_RESPONSE = 0x0208
 DISCONNECT_REQUEST = 0x0209
 DISCONNECT_RESPONSE = 0x020A
-TUNNELLING_REQUEST = 0x0320
-TUNNELLING_ACK = 0x0321
-ROUTING_INDICATION = 0x0330
+TUNNELLING_REQUEST = 0x0420
+TUNNELLING_ACK = 0x0421
+ROUTING_INDICATION = 0x0530
 
 CHANNEL = 0x21
 
@@ -78,7 +78,7 @@ def handle(data, peer):
         sequence = body[2]
         cemi = body[4:]
         print(f"TUNNELLING_REQUEST seq={sequence} cemi={cemi.hex()}")
-        ack = bytes([0x04, CHANNEL, sequence, 0x00, 0x00])
+        ack = bytes([0x04, CHANNEL, sequence, 0x00])
         return [frame(TUNNELLING_ACK, ack)]
 
     if service == SEARCH_REQUEST:
