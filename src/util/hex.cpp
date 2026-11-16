@@ -25,9 +25,15 @@
 
 namespace cvknx {
 
+/// Decode a hex string into bytes; empty on any error.
+///
+/// The input comes from the `v`/`a` parameters of `/w`, i.e. from the network.
+/// Rejecting the whole string instead of decoding the valid prefix is
+/// intentional: a partially decoded value would be written to the bus as a
+/// *different* value than the client asked for.
 std::vector<uint8_t> hex_decode(std::string_view hex) {
   if (hex.size() % 2 != 0) {
-    return {};  // invalid: odd length
+    return {};  // a hex string always encodes whole bytes
   }
   std::vector<uint8_t> result;
   result.reserve(hex.size() / 2);
@@ -49,6 +55,9 @@ std::vector<uint8_t> hex_decode(std::string_view hex) {
   return result;
 }
 
+/// Encode bytes as lowercase hex — the only form CometVisu accepts.
+/// Uppercase would still be valid hex, but the client compares and logs the
+/// strings verbatim, so the output form is fixed here.
 std::string hex_encode(const uint8_t* data, size_t len) {
   static constexpr std::array<char, 16> kHexChars = {'0', '1', '2', '3', '4', '5', '6', '7',
                                                      '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};

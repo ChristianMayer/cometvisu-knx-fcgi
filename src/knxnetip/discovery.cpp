@@ -15,7 +15,16 @@
 
 /**
  * @file discovery.cpp
- * @brief KNXnet/IP discovery implementation.
+ * @brief KNXnet/IP discovery implementation (`--discover`).
+ *
+ * A `SEARCH_REQUEST` is sent as a multicast (or unicast, if configured)
+ * datagram with HPAI 0.0.0.0:0, so every device answers to the source address
+ * of our datagram — the interface does not have to be known in advance, which
+ * is what makes the command usable on a machine with several NICs.
+ *
+ * The function is synchronous and bounded by `timeout_ms`: it collects answers
+ * until the deadline expires, because a KNXnet/IP backbone has no "end of
+ * answers" marker and a second of waiting is cheap compared to a rerun.
  */
 
 #include "knxnetip/discovery.h"
@@ -66,6 +75,9 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
   local.sin_family = AF_INET;
   local.sin_addr.s_addr = htonl(INADDR_ANY);
   local.sin_port = htons(options.bind_port);
+  // Bind before sending: the answers go to the source address of the request,
+  // so the socket has to exist and be bound first.  bind_port 0 lets the OS
+  // pick an ephemeral port.
   if (::bind(fd, reinterpret_cast<struct sockaddr*>(&local), sizeof(local)) != 0) {
     ::close(fd);
     return devices;
@@ -73,6 +85,9 @@ std::vector<DiscoveredDevice> discover_devices(const DiscoveryOptions& options) 
 
   // Host byte order — that is what IN_MULTICAST() expects.
   if (IN_MULTICAST(*destination_address)) {
+    // Join the group so the socket receives the answers that are sent back to
+    // the multicast group as well (a KNXnet/IP router may answer to the group
+    // rather than to our unicast source address).
     struct ip_mreqn membership {};
     membership.imr_multiaddr.s_addr = htonl(*destination_address);
     membership.imr_address.s_addr = htonl(INADDR_ANY);

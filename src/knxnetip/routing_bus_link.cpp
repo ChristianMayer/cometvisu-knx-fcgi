@@ -16,6 +16,12 @@
 /**
  * @file routing_bus_link.cpp
  * @brief KNXnet/IP IP routing transport implementation.
+ *
+ * Routing is stateless: there is no connection, no acknowledgement and no
+ * keep-alive, and a write is published as a multicast `ROUTING_INDICATION`
+ * that every other participant (including us, through the multicast loop)
+ * receives.  That is why this link never reports a "bus" outage of its own —
+ * a router that disappeared is indistinguishable from a quiet bus.
  */
 
 #include "knxnetip/routing_bus_link.h"
@@ -152,8 +158,7 @@ bool RoutingBusLink::connect() {
     // cannot be injected from a test process.
     const bool joined =
         ::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership)) == 0;
-    // GCOV_EXCL_START - a kernel that refuses the join is a host configuration
-    // problem and cannot be injected from a test process.
+    // GCOV_EXCL_START - see above: only a misconfigured host reaches this
     if (!joined) {
       std::cerr << "[ERROR] Cannot join KNXnet/IP multicast group " << options_.address << "\n";
       disconnect();

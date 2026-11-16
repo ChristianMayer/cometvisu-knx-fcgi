@@ -22,16 +22,17 @@
  * blocks waiting for new data via the shared cache's condition variable.
  *
  * The shared cache (SharedGroupCache) is populated by a dedicated cache
- * reader process that drains the single knxd group socket.  Workers query
- * the cache directly — no per-worker knxd group socket needed.  This
- * ensures a single, authoritative position counter (`i`) across all
- * workers, preventing duplicate delivery and non-monotonic index bugs.
+ * reader process that owns the single bus connection of the configured
+ * transport.  Workers query the cache directly — no worker ever holds a bus
+ * connection of its own.  This ensures a single, authoritative position
+ * counter (`i`) across all workers, preventing duplicate delivery and
+ * non-monotonic index bugs.
  *
  * Key differences from eibread-cgi:
  *   - Uses a shared-memory cache with process-shared mutex/condvar
  *     instead of per-process caches or knxd's built-in cache.
- *   - For t=0 (read from bus): sends GroupValueRead for uncached addresses
- *     via the worker's write-only group socket, then returns immediately.
+ *   - For t=0 (read from bus): enqueues GroupValueRead telegrams for uncached
+ *     addresses into the shared TX ring, then returns immediately.
  *     Read-responses arrive asynchronously and are handled like normal bus
  *     writes by the cache reader process.
  */
@@ -116,7 +117,13 @@ private:
   int longpoll_timeout_sec_;
   std::string outage_key_;
 
-  [[nodiscard]] static std::optional<int> parse_timeout(std::string_view t_str);
+  /// Parse a whole-number request parameter (`t` or `i`).
+  ///
+  /// Both use the same syntax, so one parser serves them; anything that is not
+  /// a complete decimal number (including "", "5x", "1.5") yields
+  /// std::nullopt and lets the caller decide whether that is a client error
+  /// (`t`) or simply "not provided" (`i`).
+  [[nodiscard]] static std::optional<int> parse_int_parameter(std::string_view text);
 };
 
 }  // namespace cvknx

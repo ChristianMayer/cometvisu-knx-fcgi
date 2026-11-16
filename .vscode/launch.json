@@ -52,13 +52,13 @@
     //
     // Once the app is running, test with the helper script:
     //
-    //   ./tools/fcgi-curl.sh GET '/r?a=KNX:1/2/3&t=5'
-    //   ./tools/fcgi-curl.sh POST '/l' 'user=admin&pass=admin'
-    //   ./tools/fcgi-curl.sh POST '/w' 'knx=1/2/3&data=0c6f&type=write'
+    //   ./tools/fcgi-curl.sh GET '/r?s=0&a=KNX:1/2/3&t=5'
+    //   ./tools/fcgi-curl.sh POST '/l' 'u=admin&p=admin'
+    //   ./tools/fcgi-curl.sh POST '/w' 's=0&a=1/2/3&v=8042'
     //
     // Or using cgi-fcgi directly:
     //
-    //   REQUEST_METHOD=GET QUERY_STRING="a=KNX:1/2/3&t=5" \
+    //   REQUEST_METHOD=GET QUERY_STRING="s=0&a=KNX:1/2/3&t=5" \
     //     cgi-fcgi -bind -connect 127.0.0.1:9000
     //
     {

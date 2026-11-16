@@ -76,7 +76,8 @@ public:
   /// be served by workers that finish quickly.
   ///
   /// @param sem Pointer to a sem_t in shared memory (MAP_SHARED).  Must be
-  ///            initialized to the number of workers before forking.
+  ///            initialized before forking, to the number of long-polls the
+  ///            pool may serve (workers minus the short-request reserve).
   void set_load_shed_semaphore(sem_t* sem);
 
   /// @brief Set a shared semaphore for general request concurrency limiting.
@@ -91,14 +92,14 @@ public:
   /// failed operation.
   ///
   /// @param sem Pointer to a sem_t in shared memory (MAP_SHARED).  Must be
-  ///            initialized to a safe concurrency limit (typically equal to
-  ///            the worker count).
+  ///            initialized before forking to the same long-poll capacity as
+  ///            the load-shed semaphore (see longpoll_capacity() in main.cpp).
   void set_concurrency_semaphore(sem_t* sem);
 
   /// @brief Open a TCP or Unix socket for direct FCGI connections.
   ///
-  /// Once opened, the socket is automatically used by run() alongside the
-  /// standard FCGI stdin/stdout stream.
+  /// The listen fd is what makes the fork-based pool work: every worker
+  /// inherits it, and the OS serialises the accept() calls across processes.
   ///
   /// @param socket_path Either ":port" for TCP (e.g. ":9000") or a
   ///                    filesystem path for a Unix domain socket.

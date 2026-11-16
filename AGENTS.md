@@ -12,6 +12,25 @@ record, the git history holds the implementation plan.
 (g++, clang, cmake, ninja, clang-format, clang-tidy, gdb, `libfcgi-dev`,
 `knxd`/`knxd-dev`, `tcpdump`, `socat`).  Use it for reproducible builds.
 
+## Git and release actions — permission required
+
+**An agent must never commit, push, tag, create or delete branches, open or
+modify a pull request, or otherwise change repository state on the
+maintainer's behalf.**  Those are the maintainer's decisions and are made case
+by case.
+
+- Stop at the working tree: edit files, run builds and tests, then report what
+  changed.  `git add`, `git commit` and everything after it belong to the human.
+- This also covers sibling repositories (`CometVisu/Docker`) and anything other
+  people can see: pushes, PR comments, issue edits, releases.
+- Only an explicit instruction in the *current* request ("commit this", "push
+  that branch", "open a PR") grants permission, and only for that single
+  action.  A task like "implement feature X" or "clean up the docs" does **not**
+  include committing the result, and permission never carries over from an
+  earlier turn or an earlier session.
+- If a commit is needed for the work to make sense (e.g. it spans several
+  steps), say so and let the human run the commands.
+
 ## Development Methodology
 
 **Test-Driven Development (TDD) is mandatory.** The cycle is:

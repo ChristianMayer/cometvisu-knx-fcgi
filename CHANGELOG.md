@@ -5,16 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - unreleased
 
 ### Removed
 
-- **Spawn-fcgi mode** (FastCGI on stdin/stdout): `FcgiServer::read_request()`
-  without an `envp` array, the `FCGI_Accept` loop and the `FCGI_fwrite` response
-  path were removed together with `tests/e2e/test_spawn_mode_e2e.cpp`.  The
-  direct-socket path is the only one that can host the cache reader.
+- **Spawn-fcgi mode** (FastCGI on stdin/stdout) is gone: a process that does
+  not own a listen socket cannot host the worker pool or the cache reader.  See
+  *Breaking changes* for the migration.
 
-### Security / hardening
+### Security
 
 - **`/r` and `/w` now require the protocol's session parameter `s`** and answer
   `401 {"error":"missing session"}` without it (the anonymous session `"0"` that
@@ -82,8 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Migration:** add `KNX_TRANSPORT=knxd` to keep 1.x behaviour unchanged.
 - **The project is renamed** from `cometvisu-knxd-fcgi` to
   `cometvisu-knx-fcgi` (<https://github.com/CometVisu/cometvisu-knx-fcgi>).
-  Update `spawn-fcgi`, container and systemd invocations that start the binary
-  by path; a `cometvisu-knxd-fcgi` symlink keeps existing setups working.
+  Update container, systemd and supervisor commands that start the binary by
+  path; a `cometvisu-knxd-fcgi` symlink keeps existing setups working.
 - **The outage block in `/r` and `/w` uses a transport-specific key**: `"knxd"`
   for the knxd transport (unchanged) and `"bus"` for the KNXnet/IP transports.
   The inner object (`ok`, `since`, `lastOk`) is identical.
@@ -97,7 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addresses kept in the shared cache.
 - **`KNX_TX_MAX_PER_SEC`** (default `10`): hard upper bound on outgoing
   telegrams per second, over all clients and workers (see *Security* above).
-
 - **Direct KNXnet/IP tunnelling** (`KNX_TRANSPORT=ip-tunnel`): the backend is a
   client of a KNX IP interface or router — no knxd required.  Includes the
   tunnel handshake, acknowledgement and retransmission, rejection of duplicate

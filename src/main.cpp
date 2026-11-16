@@ -53,6 +53,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -292,29 +293,42 @@ int run_discovery() {
   return 0;
 }
 
+/// One aligned `[INFO]   NAME  value` line of the startup banner.
+///
+/// The banner is the first thing an operator reads in a container log, so the
+/// values must line up no matter how long the variable name is.
+void print_setting(std::string_view name, std::string_view value) {
+  constexpr int kNameColumn = 22;
+  std::cout << "[INFO]   " << std::left << std::setw(kNameColumn) << name << std::right << value
+            << "\n";
+}
+
+/// Everything the banner shows about the environment.
+struct StartupSettings {
+  int longpoll_timeout_sec;
+  int num_workers;
+  int max_tx_per_sec;
+  std::string_view fcgi_socket;
+  std::string_view address_prefix;
+  std::string_view base_url;
+};
+
 /// Print the effective configuration (one line per setting).
-void print_startup_info(const cvknx::BusConfig& bus_config, int longpoll_timeout, int num_workers,
-                        const char* fcgi_socket, const char* address_prefix, const char* base_url) {
-  std::cout << "[INFO] cometvisu-knx-fcgi " << cvknx::version() << " starting\n";
+void print_startup_info(const cvknx::BusConfig& bus_config, const StartupSettings& settings) {
+  std::cout << "[INFO] " << cvknx::application_name() << " " << cvknx::version() << " starting\n";
   std::cout << "[INFO] Configuration:\n";
-  std::cout << "[INFO]   KNX_TRANSPORT        "
-            << cvknx::bus_transport_to_string(bus_config.transport) << "\n";
-  std::cout << "[INFO]   BUS                  " << bus_config.describe() << "\n";
-  std::cout << "[INFO]   FCGI_SOCKET           " << fcgi_socket << "\n";
-  std::cout << "[INFO]   FCGI_WORKERS          " << num_workers << "\n";
-  std::cout << "[INFO]   LONGPOLL_TIMEOUT_SEC  " << longpoll_timeout << "\n";
-  std::cout << "[INFO]   ADDRESS_PREFIX        "
-            << (*address_prefix != '\0' ? address_prefix : "(not set)") << "\n";
-  std::cout << "[INFO]   BASE_URL              "
-            << (base_url != nullptr && *base_url != '\0' ? base_url : "(not set)") << "\n";
-  std::cout << "[INFO]   LOGIN_EXTRA_CONFIG    "
-            << (std::getenv("LOGIN_EXTRA_CONFIG") != nullptr ? std::getenv("LOGIN_EXTRA_CONFIG")
-                                                             : "(not set)")
-            << "\n";
-  std::cout << "[INFO]   DEBUG_BACKEND         "
-            << (std::getenv("DEBUG_BACKEND") != nullptr ? std::getenv("DEBUG_BACKEND")
-                                                        : "(not set)")
-            << "\n";
+  using cvknx::bus_transport_to_string;
+  print_setting("KNX_TRANSPORT", bus_transport_to_string(bus_config.transport));
+  print_setting("BUS", bus_config.describe());
+  print_setting("FCGI_SOCKET", settings.fcgi_socket);
+  print_setting("FCGI_WORKERS", std::to_string(settings.num_workers));
+  print_setting("LONGPOLL_TIMEOUT_SEC", std::to_string(settings.longpoll_timeout_sec));
+  print_setting("KNX_TX_MAX_PER_SEC", std::to_string(settings.max_tx_per_sec));
+  print_setting("ADDRESS_PREFIX",
+                settings.address_prefix.empty() ? "(not set)" : settings.address_prefix);
+  print_setting("BASE_URL", settings.base_url.empty() ? "(not set)" : settings.base_url);
+  print_setting("LOGIN_EXTRA_CONFIG", get_env_default("LOGIN_EXTRA_CONFIG", "(not set)"));
+  print_setting("DEBUG_BACKEND", get_env_default("DEBUG_BACKEND", "(not set)"));
 }
 
 /// Create a process-shared semaphore in shared memory (or nullptr).
@@ -357,6 +371,7 @@ struct PoolResources {
   cvknx::SharedTxQueue& tx_queue;
   cvknx::SharedTxBusLink& worker_link;
   int num_workers;
+  int max_tx_per_sec;
 };
 
 /// Fork the cache reader child.
@@ -405,7 +420,7 @@ pid_t spawn_cache_reader(PoolResources& res) {
     // telegrams to the bus, so this bounds the traffic of *every* client and
     // every worker at once.  A client that writes thousands of addresses, or
     // one that retries in a loop, can therefore never flood the bus.
-    reader_options.max_tx_per_sec = parse_env_int("KNX_TX_MAX_PER_SEC", 10, 1, 1000);
+    reader_options.max_tx_per_sec = res.max_tx_per_sec;
     cvknx::run_cache_reader(*reader_link, res.cache, &res.tx_queue, reader_options,
                             [] { return g_shutdown_requested != 0; });
 
@@ -729,6 +744,9 @@ int main(int argc, char* argv[]) {
   const int longpoll_timeout =
       parse_env_int("LONGPOLL_TIMEOUT_SEC", 300, 1, kMaxLongpollTimeoutSec);
   const int num_workers = parse_env_int("FCGI_WORKERS", 20, 1, 256);
+  // Parsed once and handed to the cache reader: the banner and the enforced
+  // limit must never disagree.
+  const int max_tx_per_sec = parse_env_int("KNX_TX_MAX_PER_SEC", 10, 1, 1000);
   const int session_ttl_sec =
       parse_env_int("SESSION_TTL_SEC", SessionStore::kDefaultSessionTtlSec, 1, kMaxSessionTtlSec);
   const int session_max =
@@ -760,8 +778,9 @@ int main(int argc, char* argv[]) {
   }
 
   KnxAddress::set_default_namespace(address_prefix);
-  print_startup_info(bus_config, longpoll_timeout, num_workers, fcgi_socket, address_prefix,
-                     base_url);
+  print_startup_info(bus_config,
+                     StartupSettings{longpoll_timeout, num_workers, max_tx_per_sec, fcgi_socket,
+                                     address_prefix, base_url != nullptr ? base_url : ""});
 
   // ---- Initialize FCGI server (before the bus) ----
   // Set up the FastCGI listen socket first so it's ready for connections before
@@ -885,7 +904,8 @@ int main(int argc, char* argv[]) {
   sem_t* concurrency_sem = create_shared_semaphore(longpoll_capacity(num_workers), "concurrency");
   server.set_concurrency_semaphore(concurrency_sem);
 
-  PoolResources resources{server, bus_config, shared_cache, tx_queue, worker_link, num_workers};
+  PoolResources resources{server,      bus_config,  shared_cache,  tx_queue,
+                          worker_link, num_workers, max_tx_per_sec};
   const int result = run_worker_pool(resources, load_shed_sem, concurrency_sem);
 
   // ---- Clean up shared semaphores ----

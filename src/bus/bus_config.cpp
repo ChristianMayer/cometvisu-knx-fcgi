@@ -72,6 +72,8 @@ bool parse_individual_address(const std::string& text, std::uint16_t& out) {
   unsigned line = 0;
   unsigned device = 0;
   char extra = 0;
+  // The trailing %c turns "1.1.2.3" or "1.1.2x" into 4 conversions, so a
+  // value that merely *starts* like an address is rejected as a whole.
   if (std::sscanf(text.c_str(), "%u.%u.%u%c", &area, &line, &device, &extra) != 3) {
     return false;
   }
@@ -79,7 +81,8 @@ bool parse_individual_address(const std::string& text, std::uint16_t& out) {
     return false;
   }
   out = static_cast<std::uint16_t>(((area & 0x0FU) << 12) | ((line & 0x0FU) << 8) | device);
-  return out != 0;
+  // device != 0 above already guarantees a non-zero address.
+  return true;
 }
 
 }  // namespace

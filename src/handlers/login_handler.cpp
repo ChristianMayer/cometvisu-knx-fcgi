@@ -43,6 +43,10 @@ LoginHandler::LoginHandler(SessionStore& sessions, std::string base_url)
 std::string LoginHandler::handle(std::string_view query_string) {
   const QueryString params{query_string};
 
+  // Authentication is the web server's job: `u`/`p` are read but never
+  // validated, they only decide whether this is an anonymous session (no
+  // CometVisu login configured).  The anonymous id "0" is a valid session id
+  // for every later `/r` and `/w`, so a credential-less front end works.
   const bool anonymous = !params.has("u") && !params.has("p");
   const std::string session_id = sessions_.create_session(anonymous);
 

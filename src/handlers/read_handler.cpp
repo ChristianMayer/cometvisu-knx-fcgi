@@ -48,6 +48,10 @@
 
 namespace cvknx {
 
+/// Clamp a client supplied `t` to the hard wait limit.
+///
+/// `t` is both the age filter and the long-poll duration, so an unclamped
+/// value would let one request occupy a worker for years.
 int clamp_client_wait(int requested_sec) {
   return requested_sec > kMaxClientWaitSec ? kMaxClientWaitSec : requested_sec;
 }
@@ -60,16 +64,18 @@ ReadHandler::ReadHandler(SharedGroupCache& cache, BusLink& knxd, SessionStore& s
       longpoll_timeout_sec_(std::clamp(longpoll_timeout_sec, 1, kMaxClientWaitSec)),
       outage_key_(std::move(outage_key)) {}
 
-std::optional<int> ReadHandler::parse_timeout(std::string_view t_str) {
-  if (t_str.empty()) {
+std::optional<int> ReadHandler::parse_int_parameter(std::string_view text) {
+  if (text.empty()) {
     return std::nullopt;
   }
   int val = 0;
-  const auto [ptr, ec] = std::from_chars(t_str.data(), t_str.data() + t_str.size(), val);
+  const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), val);
   if (ec != std::errc{}) {
     return std::nullopt;
   }
-  if (ptr != t_str.data() + t_str.size()) {
+  // from_chars stops at the first non-digit; an unconsumed tail means the
+  // parameter is not a number (e.g. "12abc").
+  if (ptr != text.data() + text.size()) {
     return std::nullopt;
   }
   return val;
@@ -120,7 +126,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   bool t_provided = false;
   int t_original = 0;
   if (auto t_opt = params.get("t")) {
-    const auto parsed = parse_timeout(*t_opt);
+    const auto parsed = parse_int_parameter(*t_opt);
     if (!parsed) {
       result.http_status = 400;
       result.body = R"({"error":"invalid timeout"})";
@@ -141,7 +147,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
 
   uint32_t lastpos = 0;
   if (auto i_opt = params.get("i")) {
-    const auto parsed = parse_timeout(*i_opt);
+    const auto parsed = parse_int_parameter(*i_opt);
     if (parsed && *parsed >= 0) {
       lastpos = static_cast<uint32_t>(*parsed);
     }

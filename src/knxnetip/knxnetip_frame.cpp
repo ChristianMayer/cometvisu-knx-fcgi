@@ -38,7 +38,12 @@ void append_u16(std::vector<std::uint8_t>& out, std::uint16_t value) {
   out.push_back(static_cast<std::uint8_t>(value & 0xFF));
 }
 
-/// Length of the body of a given service type, or -1 when variable/unknown.
+/// True for the service types this backend understands.
+///
+/// Anything else is dropped before its body is interpreted: routers and
+/// gateways emit additional services (e.g. `SEARCH_REQUEST_EXTENDED` or
+/// `ROUTING_SYSTEM_BROADCAST`), and a body read with the wrong layout is a
+/// source of garbage values.
 bool is_known_service(std::uint16_t value) {
   switch (static_cast<ServiceType>(value)) {
     case ServiceType::SearchRequest:
@@ -217,7 +222,9 @@ std::optional<ConnectResponse> parse_connect_response(std::span<const std::uint8
     return std::nullopt;
   }
   const auto& body = parsed->body;
-  if (body.size() < 14) {  // channel + status + HPAI + CRD (2+2)
+  // 2 (channel, status) + 8 (HPAI) + 4 (CRD) is the smallest legal body; a
+  // shorter one would make the CRD read below run past the end.
+  if (body.size() < 14) {
     return std::nullopt;
   }
   ConnectResponse response;
@@ -233,6 +240,10 @@ std::optional<ConnectResponse> parse_connect_response(std::span<const std::uint8
   return response;
 }
 
+// CONNECTIONSTATE_REQUEST and DISCONNECT_REQUEST share one body layout
+// (03_08_01 5.4/5.5): channel, reserved byte, control HPAI.  They are kept as
+// two functions because the service code in the header differs and a caller
+// must not be able to confuse the two.
 std::vector<std::uint8_t> build_connectionstate_request(std::uint8_t channel, const Hpai& control) {
   std::vector<std::uint8_t> body;
   body.push_back(channel);

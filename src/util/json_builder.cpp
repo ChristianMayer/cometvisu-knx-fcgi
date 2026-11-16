@@ -24,13 +24,14 @@ namespace cvknx {
 
 void JsonBuilder::start_object() {
   buffer_.push_back('{');
+  // The first member of a nested object must not be preceded by a comma.
   first_ = true;
-  ++open_objects_;
 }
 
 void JsonBuilder::end_object() {
   buffer_.push_back('}');
-  --open_objects_;
+  // The object itself is a value of its parent, so the next member written to
+  // the parent needs a separator.
   first_ = false;
 }
 
@@ -42,12 +43,12 @@ void JsonBuilder::add_comma() {
 
 void JsonBuilder::add_quoted(std::string_view str) {
   buffer_.push_back('"');
-  // Note: Only the four JSON-special characters are escaped here (", \, \n, \r, \t).
-  // Other C0 control characters (0x00–0x1F) are NOT escaped, which would produce
-  // technically invalid JSON. This is NOT a practical concern because:
-  //   - All strings passed to this builder come from hex_encode() (always [0-9a-f])
-  //   - Keys are fixed protocol strings (no special chars)
-  //   - The CometVisu Protocol never transmits arbitrary user data in JSON keys/values.
+  // Escape every character that would end the string early (`"`, `\\`) or
+  // break the line format (CR/LF/TAB), plus the remaining C0 controls and DEL
+  // as \u00XX.  Today every value this builder sees is either a fixed
+  // protocol key or a hex string, but a single unescaped control character
+  // would make the whole response unparsable for the client — escaping is a
+  // few instructions, a broken response is a support case.
   for (char c : str) {
     switch (c) {
       case '"':
@@ -71,9 +72,6 @@ void JsonBuilder::add_quoted(std::string_view str) {
         buffer_.push_back('t');
         break;
       default:
-        // JSON forbids raw control characters.  Nothing untrusted reaches a
-        // JSON string today, but a single unescaped 0x01 would make the whole
-        // response unparsable — escape instead of trusting the caller.
         if (const auto uc = static_cast<unsigned char>(c); uc < 0x20 || uc == 0x7F) {
           static constexpr char kHexDigits[] = "0123456789abcdef";
           buffer_.append("\\u00");

@@ -45,6 +45,10 @@ bool SharedTxBusLink::send_group_packet(std::uint16_t group_addr,
 
 bool SharedTxBusLink::poll_group_telegram(std::uint16_t& out_group_addr,
                                           std::vector<std::uint8_t>& out_apdu) {
+  // Workers never receive telegrams: the cache reader owns the bus connection
+  // for RX as well and pushes inbound values straight into the shared cache.
+  // A worker that could read here would steal telegrams from the other
+  // workers' long-polls, so the method stays a no-op.
   (void)out_group_addr;
   (void)out_apdu;
   return false;

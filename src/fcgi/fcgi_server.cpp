@@ -362,23 +362,19 @@ FcgiRequest FcgiServer::read_request(
       size_t total = 0;
       while (total < max_len) {
         const size_t remaining = max_len - total;
-        // The direct-socket mode uses the FCGX API, whose stdin stream is
-        // request_.in — the FCGI_FILE layer (`stdin`) belongs to the
-        // spawn-fcgi mode and is not attached to this request.
+        // FCGX_GetStr() reads from this request's stdin stream (`request_.in`)
+        // and returns at most `remaining` bytes, 0 at the end of the body and
+        // -1 on error.  The count is clamped anyway: `total` must never exceed
+        // the buffer, because a stream in an unexpected state used to return a
+        // nonsensical count, and adding it overflowed the size passed to
+        // resize() — which threw out of run() and killed the worker.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         const int got = FCGX_GetStr(reinterpret_cast<char*>(req.content.data() + total),
                                     static_cast<int>(remaining), request_.in);
-        const auto nread = static_cast<size_t>(got < 0 ? 0 : got);
-        // fread() returns the number of *items* read, never more than nmemb.
-        // A stream that is not attached to a FastCGI request (direct-socket
-        // mode reuses the FCGX API instead of the FCGI_FILE layer) reports a
-        // meaningless count; adding it to `total` used to overflow, and the
-        // following resize() then threw std::length_error out of run() and
-        // killed the worker.  Clamp instead of trusting the value.
-        if (nread == 0) {
-          break;  // end of the request body
+        if (got <= 0) {
+          break;  // end of body (or a read error) — keep what arrived
         }
-        total += std::min(nread, remaining);
+        total += std::min(static_cast<size_t>(got), remaining);
       }
       req.content.resize(total);
     }
@@ -388,7 +384,9 @@ FcgiRequest FcgiServer::read_request(
 }
 
 void FcgiServer::write_response(const FcgiResponse& response) {
-  // Build the full HTTP response as a single string.
+  // FastCGI has no status line in its protocol: the HTTP status travels as a
+  // `Status:` header and Content-Length must be set explicitly, because libfcgi
+  // streams the headers and the body through unchanged.
   std::string output;
   output.reserve(256 + response.body.size());
 

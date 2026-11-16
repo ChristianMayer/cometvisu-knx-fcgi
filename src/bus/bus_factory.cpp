@@ -32,27 +32,26 @@
 namespace cvknx {
 
 std::unique_ptr<BusLink> create_bus_link(const BusConfig& config) {
-  switch (config.transport) {  // GCOV_EXCL_BR_LINE - exhaustive enum switch
-    case BusTransport::Knxd: {
-#ifdef KNX_WITH_KNXD_TRANSPORT
-      return std::make_unique<KnxdClient>(config.knxd_socket);
-#else
-      std::cerr << "[ERROR] KNX_TRANSPORT=knxd requires a build with "
-                   "-DKNX_BUILD_KNXD_TRANSPORT=ON\n";
-      return nullptr;
-#endif
-    }
-    case BusTransport::IpTunnel:
-      return std::make_unique<TunnelingBusLink>(TunnelOptions::from_config(config));
-    case BusTransport::IpRouting:
-      return std::make_unique<RoutingBusLink>(RoutingOptions::from_config(config));
+  // An if-chain instead of a switch: the knxd arm below is a compile-time
+  // choice, so a switch would need a `default` (unreachable for a complete
+  // enum) or leave `-Wreturn-type` unhappy.  A transport added to the enum and
+  // forgotten here still fails loudly, because `bus_transport_to_string()`
+  // switches over the same enum without a default.
+  if (config.transport == BusTransport::IpTunnel) {
+    return std::make_unique<TunnelingBusLink>(TunnelOptions::from_config(config));
   }
-
-  // Reached only if the switch above gains a transport without an
-  // implementation; every enum value is handled today.
-  std::cerr << "[ERROR] Transport '" << bus_transport_to_string(config.transport)  // GCOV_EXCL_LINE
-            << "' is not available in this build\n";                               // GCOV_EXCL_LINE
-  return nullptr;                                                                  // GCOV_EXCL_LINE
+  if (config.transport == BusTransport::IpRouting) {
+    return std::make_unique<RoutingBusLink>(RoutingOptions::from_config(config));
+  }
+  // knxd is the only transport that can be compiled out; the caller then falls
+  // back to "bus unavailable" instead of failing at the first write.
+#ifdef KNX_WITH_KNXD_TRANSPORT
+  return std::make_unique<KnxdClient>(config.knxd_socket);
+#else
+  std::cerr << "[ERROR] KNX_TRANSPORT=knxd requires a build with "
+               "-DKNX_BUILD_KNXD_TRANSPORT=ON\n";
+  return nullptr;
+#endif
 }
 
 }  // namespace cvknx
