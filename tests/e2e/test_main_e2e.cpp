@@ -378,6 +378,15 @@ TEST(MainE2ETest, TunnelWithoutHostIsRejected) {
   EXPECT_NE(process.output().find("KNX_IP_HOST"), std::string::npos) << process.output();
 }
 
+/// The listen socket is mandatory now that spawn-fcgi mode is gone: without it
+/// there would be nothing to accept on (and no bus owner, either).
+TEST(MainE2ETest, MissingFcgiSocketIsRejected) {
+  BackendProcess process({}, RoutingEnv());
+  EXPECT_EQ(process.wait_exit(), 1);
+  EXPECT_NE(process.output().find("FCGI_SOCKET is required"), std::string::npos)
+      << process.output();
+}
+
 TEST(MainE2ETest, InvalidNumericSettingsFallBackToSafeValues) {
   Env env = RoutingEnv();
   // Unparsable values fall back to the documented defaults instead of aborting.

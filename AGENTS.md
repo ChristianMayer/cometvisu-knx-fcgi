@@ -196,6 +196,12 @@ actual file content (e.g., `#pragma once` or `#include`).
    This is critical because long-poll `/r` requests block for up to 300
    seconds — without multiple workers, one long-poll would block all other
    clients. Worker count is configurable via `FCGI_WORKERS` (default: 20).
+   **The listen socket is mandatory** (`FCGI_SOCKET`, a Unix path or a TCP
+   port): the backend opens it itself and the workers inherit it.  The
+   classic spawn-fcgi model (FastCGI on stdin/stdout) is deliberately not
+   supported — a process that does not own a listen socket can host neither
+   the pool nor the cache reader, so it would accept writes into a TX ring
+   that nobody drains.  Refusing to start is better than pretending to work.
    Workers never open a bus connection of their own (see decision 2).
    All shared state (SharedGroupCache, SharedTxQueue, SessionStore) lives in
    `mmap(MAP_SHARED|MAP_ANONYMOUS)` memory created **before the first fork**

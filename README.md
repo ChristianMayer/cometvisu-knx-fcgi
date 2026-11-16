@@ -24,9 +24,17 @@ dependency.
 > **Renamed**: this project was called `cometvisu-knxd-fcgi` up to and including
 > v1.2.1.  The repository now lives at
 > <https://github.com/CometVisu/cometvisu-knx-fcgi> and the binary is named
-> `cometvisu-knx-fcgi`.  Deployments that start the binary by path (`spawn-fcgi`,
-> container entrypoints) must use the new name; a symlink
+> `cometvisu-knx-fcgi`.  Deployments that start the binary by path (container
+> entrypoints, systemd units) must use the new name; a symlink
 > `cometvisu-knxd-fcgi -> cometvisu-knx-fcgi` keeps old setups working.
+
+> **FastCGI socket required**: the backend always opens its own listen socket
+> (`FCGI_SOCKET`).  Serving FastCGI on stdin/stdout (the classic `spawn-fcgi`
+> model) is no longer supported, because the single bus owner (cache reader) and
+> the forked worker pool need an inherited listen socket.  Start the binary from
+> your process supervisor (systemd, supervisord, a container entrypoint, or
+> simply `&`) and point the web server at the socket; see *Run tests / Run the
+> server* below.
 
 ## Quick Start
 
@@ -81,11 +89,16 @@ ctest --test-dir build --output-on-failure
 # Only the black-box interoperability suites (needs knxd + knxtool)
 ctest --test-dir build -L blackbox --output-on-failure
 
-# Run via spawn-fcgi (traditional FastCGI mode)
-KNX_TRANSPORT=knxd spawn-fcgi -p 9000 -n ./build/src/cometvisu-knx-fcgi
+# Run the backend (it opens FCGI_SOCKET itself)
+KNX_TRANSPORT=knxd FCGI_SOCKET=/run/cometvisu-fcgi.sock ./build/src/cometvisu-knx-fcgi
 
-# Run standalone (direct socket — no spawn-fcgi needed)
-KNX_TRANSPORT=knxd FCGI_SOCKET=:9000 ./build/src/cometvisu-knx-fcgi
+# Or with a TCP port on the loopback interface
+KNX_TRANSPORT=knxd FCGI_SOCKET=127.0.0.1:9000 ./build/src/cometvisu-knx-fcgi
+
+# Point the web server at the Unix socket, e.g. Apache:
+#   ProxyPass "/cgi-bin/r" "unix:/run/cometvisu-fcgi.sock|fcgi://localhost/r"
+# or nginx:
+#   fastcgi_pass unix:/run/cometvisu-fcgi.sock;
 
 # Direct KNXnet/IP connection, no knxd needed
 KNX_TRANSPORT=ip-tunnel KNX_IP_HOST=192.168.1.10 FCGI_SOCKET=:9000 \
@@ -132,8 +145,8 @@ does that for you.
 | `KNX_IP_HEARTBEAT_SEC`| `60`       | `ip-tunnel`: `CONNECTIONSTATE_REQUEST` interval (10–86400) |
 | `KNX_IP_ACK_TIMEOUT_MS`| `1000`    | `ip-tunnel`: ACK timeout before retransmitting (10–60000) |
 | `KNX_IP_RETRIES`      | `3`        | `ip-tunnel`: retransmissions per telegram (1–10) |
-| `FCGI_SOCKET`         | *(unset)*  | Direct FCGI socket (`:port` for TCP, or filesystem path for Unix socket). When set, the server runs standalone without `spawn-fcgi`. |
-| `FCGI_WORKERS`        | `20`       | Number of worker processes in direct socket mode (1–256). Each worker handles one concurrent client using `fork()`-based pre-forking. Idle workers cost ~few MB resident RAM each. Workers never open a bus connection of their own — they enqueue writes into the shared TX queue. |
+| `FCGI_SOCKET`         | *(required)* | FCGI listen socket: `:port` for TCP, or a filesystem path for a Unix socket. The backend opens it itself (there is no spawn-fcgi mode); a Unix socket is restricted to `0660`. |
+| `FCGI_WORKERS`        | `20`       | Number of worker processes (1–256). Each worker handles one concurrent client using `fork()`-based pre-forking. Idle workers cost ~few MB resident RAM each. Workers never open a bus connection of their own — they enqueue writes into the shared TX queue. Two workers stay reserved for `/w` and `/l`, so `FCGI_WORKERS` is also the upper bound for concurrent long-polls (`FCGI_WORKERS - 2`). |
 | `LONGPOLL_TIMEOUT_SEC`| `300`      | Max seconds to wait in long-poll `/r`    || `KNX_TX_MAX_PER_SEC`  | `10`       | Hard upper bound on outgoing telegrams per second over **all** clients and workers (1–1000). The cache reader is the only process that sends, so this limit cannot be bypassed by a client — or by a buggy one — and it protects the bus from flooding. || `BASE_URL`            | *(unset)*  | When set, the login (`/l`) response includes a config object `"c"` with `"baseURL"` set to this value. Used by the web server to advertise the URL prefix under which the backend is reachable (e.g. `/proxy/visu`). |
 | `DEBUG_BACKEND`       | *(unset)*  | Set to `1` to enable debug logging to stderr |
 
@@ -145,7 +158,7 @@ environment variables to stdout:
 [INFO] Configuration:
 [INFO]   KNX_TRANSPORT        knxd
 [INFO]   BUS                  transport=knxd socket=/run/knx
-[INFO]   FCGI_SOCKET           (not set, spawn-fcgi mode)
+[INFO]   FCGI_SOCKET           /run/cometvisu-fcgi.sock
 [INFO]   FCGI_WORKERS          10
 [INFO]   LONGPOLL_TIMEOUT_SEC  300
 [INFO]   ADDRESS_PREFIX        (not set)

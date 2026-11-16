@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Spawn-fcgi mode** (FastCGI on stdin/stdout): `FcgiServer::read_request()`
+  without an `envp` array, the `FCGI_Accept` loop and the `FCGI_fwrite` response
+  path were removed together with `tests/e2e/test_spawn_mode_e2e.cpp`.  The
+  direct-socket path is the only one that can host the cache reader.
+
 ### Security / hardening
 
 - **`/r` and `/w` now require the protocol's session parameter `s`** and answer
@@ -51,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (which may be hours away on a quiet bus).
 
 ### Breaking changes
+
+- **`FCGI_SOCKET` is required; the spawn-fcgi mode is gone.**  The backend
+  always opens its own FastCGI listen socket (a Unix socket path or
+  `host:port`) and serves it with the fork-based worker pool.  Running the
+  binary under `spawn-fcgi` (FastCGI on stdin/stdout) is no longer supported: in
+  that mode no cache reader exists, so `/w` answered `200` for telegrams that
+  were only queued and `/r` could never return a value.  A missing
+  `FCGI_SOCKET` is now a startup error.
+  **Migration:** start the binary from systemd/supervisord/the container
+  entrypoint with `FCGI_SOCKET=/run/cometvisu-fcgi.sock` and point the web
+  server at that socket (Apache
+  `ProxyPass "/cgi-bin/r" "unix:/run/cometvisu-fcgi.sock|fcgi://localhost/r"`,
+  nginx `fastcgi_pass unix:/run/cometvisu-fcgi.sock;`), or use
+  `FCGI_SOCKET=127.0.0.1:9000` with `fastcgi_pass 127.0.0.1:9000;`.  The
+  official CometVisu container already works this way.
 
 - **`KNX_TRANSPORT` is now mandatory.**  There is no default transport: choose
   `knxd`, `ip-tunnel` or `ip-routing`.  An unset or unknown value stops the

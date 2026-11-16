@@ -652,6 +652,16 @@ TEST(FcgiServerLifecycleTest, RunWithoutAHandlerFails) {
   EXPECT_EQ(server.run(), 1);
 }
 
+/// Serving FastCGI from stdin/stdout (spawn-fcgi mode) is gone: run() needs a
+/// listen socket, because the worker pool and the cache reader share it.
+TEST(FcgiServerLifecycleTest, RunWithoutAListenSocketFails) {
+  FcgiServer server;
+  server.set_handler([](const FcgiRequest& /*req*/) -> FcgiResponse {
+    return {.status_code = 200, .body = "{}"};
+  });
+  EXPECT_EQ(server.run(), 1);
+}
+
 TEST(FcgiServerLifecycleTest, ShutdownWakesWorkersOnATcpListener) {
   FcgiServer server;
   // A TCP socket keeps getsockname() working after shutdown(SHUT_RDWR), so the

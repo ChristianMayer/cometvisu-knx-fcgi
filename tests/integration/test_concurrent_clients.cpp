@@ -547,8 +547,8 @@ TEST_F(ConcurrentClientsTest, MultipleClientsProcessedConcurrently) {
 // TDD regression test 1: environ race between worker threads.
 //
 // The original bug: all worker threads set the global `environ` pointer
-// (environ = request.envp), then read_request() called getenv() which
-// reads from environ.  Thread A could accept client A, but before reading
+// (environ = request.envp), then the request reader called getenv() — which
+// read from environ.  Thread A could accept client A, but before reading
 // its parameters, Thread B accepted client B and overwrote environ.
 // Thread A then read Thread B's parameters — silent data corruption.
 //

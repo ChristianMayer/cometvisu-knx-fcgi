@@ -17,20 +17,17 @@
  * @file fcgi_server.cpp
  * @brief FastCGI server implementation — accept loop, request parsing, response writing.
  *
- * The two-mode architecture (spawn-fcgi vs. direct socket) exists because the
- * reference eibread-cgi / eibwrite-cgi backends used spawn-fcgi exclusively.
- * We support that mode for compatibility and direct-socket mode for standalone
- * operation with a fork-based worker pool.
- *
- * In direct socket mode the key difference from the reference implementation
- * is that we use FCGX_Accept_r() on our own socket fd instead of FCGI_Accept()
- * on stdin.  The FCGX API is lower-level but gives us control over the listen
- * socket — essential for sharing it across forked children.
+ * The server owns a listen socket (created from FCGI_SOCKET, a Unix path or a
+ * TCP port) and uses the FCGX API, so the fork-based worker pool can share the
+ * socket: each child calls FCGX_Accept_r() on the inherited fd and the kernel
+ * serialises the accepts.  Serving FastCGI from stdin/stdout (the classic
+ * spawn-fcgi model) is deliberately not supported: the architecture requires a
+ * dedicated cache-reader process that owns the single bus connection, and that
+ * process only exists in the socket mode (see AGENTS.md).
  */
 
 #include "fcgi_server.h"
 
-#include <fcgi_stdio.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -42,12 +39,6 @@
 #include <iostream>
 
 #include "../util/debug_log.h"
-
-// POSIX environment pointer — used by the no-arg read_request() overload
-// via getenv().  The direct-socket and multithreaded paths pass the
-// FCGX_Request::envp array directly instead, avoiding races on environ.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,readability-redundant-declaration)
-extern char** environ;
 
 namespace cvknx {
 
@@ -162,111 +153,91 @@ int FcgiServer::run() {
     return 1;
   }
 
-  if (listen_fd_ >= 0) {
-    // ---- Direct socket mode ----
-    // Accept FastCGI connections on our own Unix/TCP socket.
-    // This is used when running standalone (e.g. via FCGI_SOCKET env var).
+  if (listen_fd_ < 0) {
+    std::cerr << "[ERROR] No FastCGI listen socket — set FCGI_SOCKET to a Unix socket path or a "
+                 "TCP port\n";
+    return 1;
+  }
+
+  // FCGX_Init() must be called before FCGX_Accept_r() — it sets the
+  // libInitialized flag and performs platform-specific setup (OS_LibInit).
+  // FCGX_InitRequest() alone does NOT mark the library as initialized.
+  // GCOV_EXCL_START - FCGX_Init() only fails on internal resource
+  // exhaustion; repeated calls return 0 as well (verified), so no test can
+  // reach this branch.
+  if (FCGX_Init() != 0) {
+    std::cerr << "[ERROR] FCGX_Init failed\n";
+    return 1;
+  }
+  // GCOV_EXCL_STOP
+
+  // GCOV_EXCL_START - see above: FCGX_InitRequest() returns 0 for a valid fd
+  // and cannot be made to fail from a test.
+  if (FCGX_InitRequest(&request_, listen_fd_, 0) != 0) {
+    std::cerr << "[ERROR] FCGX_InitRequest failed\n";
+    return 1;
+  }
+  // GCOV_EXCL_STOP
+
+  // Accept FastCGI connections on our own Unix/TCP socket.  Each worker of
+  // the fork-based pool inherits listen_fd_ and calls FCGX_Accept_r()
+  // independently; the kernel serialises the accept calls.
+  while (FCGX_Accept_r(&request_) >= 0) {
+    // Read the request parameters from the FCGI parameter array.  The
+    // spawn-fcgi-era getenv() variant is gone: envp is passed explicitly,
+    // which is thread-safe and avoids mutating the global `environ`.
+    const FcgiRequest req = read_request(request_.envp);
+
+    // ---- Capacity limiting for long-poll reads only ----
+    // Only /r can hold a worker for hundreds of seconds, so only /r takes a
+    // token.  Writes (/w) and logins (/l) finish in microseconds and must
+    // never be rejected — a spurious 503 here surfaces in CometVisu as a
+    // failed switch operation.
     //
-    // The reference eibread-cgi / eibwrite-cgi backends used only the
-    // spawn-fcgi path below.  Direct socket mode is an extension that
-    // enables the fork-based worker pool — each child inherits listen_fd_
-    // and calls FCGX_Accept_r() independently; the kernel serializes.
-
-    // FCGX_Init() must be called before FCGX_Accept_r() — it sets the
-    // libInitialized flag and performs platform-specific setup (OS_LibInit).
-    // FCGX_InitRequest() alone does NOT mark the library as initialized.
-    // GCOV_EXCL_START - FCGX_Init() only fails on internal resource
-    // exhaustion; repeated calls return 0 as well (verified), so no test can
-    // reach this branch.
-    if (FCGX_Init() != 0) {
-      std::cerr << "[ERROR] FCGX_Init failed\n";
-      return 1;
-    }
-    // GCOV_EXCL_STOP
-
-    // GCOV_EXCL_START - see above: FCGX_InitRequest() returns 0 for a valid fd
-    // and cannot be made to fail from a test.
-    if (FCGX_InitRequest(&request_, listen_fd_, 0) != 0) {
-      std::cerr << "[ERROR] FCGX_InitRequest failed\n";
-      return 1;
-    }
-    // GCOV_EXCL_STOP
-
-    while (FCGX_Accept_r(&request_) >= 0) {
-      // Read request parameters directly from the FCGI envp array.
-      // The reference eibread-cgi used getenv() which reads from the
-      // global `environ` pointer.  We pass envp directly instead, which
-      // is thread-safe and avoids the need to set `environ = request_.envp`.
-      const FcgiRequest req = read_request(request_.envp);
-
-      // ---- Capacity limiting for long-poll reads only ----
-      // Only /r can hold a worker for hundreds of seconds, so only /r takes a
-      // token.  Writes (/w) and logins (/l) finish in microseconds and must
-      // never be rejected — a spurious 503 here surfaces in CometVisu as a
-      // failed switch operation.
-      //
-      // The tokens are released by their destructors at the end of this
-      // iteration, so every exit path (early `continue`, throwing handler)
-      // returns the capacity.  A leaked token permanently shrinks the pool.
-      SemToken concurrency_token;
-      SemToken load_shed_token;
-      if (req.path() == "/r") {
-        if (concurrency_sem_ != nullptr) {
-          if (::sem_trywait(concurrency_sem_) != 0) {
-            // All workers busy — return 503 immediately
-            FcgiResponse busy_resp;
-            busy_resp.status_code = 503;
-            busy_resp.body = R"({"error":"all workers busy"})";
-            write_response(busy_resp);
-            FCGX_Finish_r(&request_);
-            continue;
-          }
-          concurrency_token = SemToken(concurrency_sem_);
+    // The tokens are released by their destructors at the end of this
+    // iteration, so every exit path (early `continue`, throwing handler)
+    // returns the capacity.  A leaked token permanently shrinks the pool.
+    SemToken concurrency_token;
+    SemToken load_shed_token;
+    if (req.path() == "/r") {
+      if (concurrency_sem_ != nullptr) {
+        if (::sem_trywait(concurrency_sem_) != 0) {
+          // All workers busy — return 503 immediately
+          FcgiResponse busy_resp;
+          busy_resp.status_code = 503;
+          busy_resp.body = R"({"error":"all workers busy"})";
+          write_response(busy_resp);
+          FCGX_Finish_r(&request_);
+          continue;
         }
-        if (load_shed_sem_ != nullptr) {
-          // sem_trywait returns 0 on success, -1 with EAGAIN if exhausted
-          if (::sem_trywait(load_shed_sem_) != 0) {
-            // All workers busy with long-polls — return empty immediately.
-            // The client will retry, and this frees up the accept queue for
-            // write requests which complete quickly.
-            FcgiResponse empty_resp;
-            empty_resp.status_code = 503;
-            empty_resp.body = R"({"error":"too many long-poll requests"})";
-            write_response(empty_resp);
-            FCGX_Finish_r(&request_);
-            continue;
-          }
-          load_shed_token = SemToken(load_shed_sem_);
-        }
+        concurrency_token = SemToken(concurrency_sem_);
       }
-
-      DebugLog::http_request(req.request_method, req.request_uri);
-
-      const FcgiResponse resp = invoke_handler(req);
-
-      DebugLog::http_response(resp.status_code, resp.body);
-
-      write_response(resp);
-
-      FCGX_Finish_r(&request_);
+      if (load_shed_sem_ != nullptr) {
+        // sem_trywait returns 0 on success, -1 with EAGAIN if exhausted
+        if (::sem_trywait(load_shed_sem_) != 0) {
+          // All workers busy with long-polls — return empty immediately.
+          // The client will retry, and this frees up the accept queue for
+          // write requests which complete quickly.
+          FcgiResponse empty_resp;
+          empty_resp.status_code = 503;
+          empty_resp.body = R"({"error":"too many long-poll requests"})";
+          write_response(empty_resp);
+          FCGX_Finish_r(&request_);
+          continue;
+        }
+        load_shed_token = SemToken(load_shed_sem_);
+      }
     }
-  } else {
-    // ---- Spawn-fcgi mode ----
-    // Accept FastCGI connections from stdin/stdout as set up by spawn-fcgi
-    // or the web server.  This is the mode used by the reference
-    // eibread-cgi / eibwrite-cgi backends — it uses the simpler FCGI_stdio
-    // API where the web server multiplexes requests onto our stdin.
-    while (FCGI_Accept() >= 0) {
-      const FcgiRequest req = read_request();
 
-      DebugLog::http_request(req.request_method, req.request_uri);
+    DebugLog::http_request(req.request_method, req.request_uri);
 
-      const FcgiResponse resp = invoke_handler(req);
+    const FcgiResponse resp = invoke_handler(req);
 
-      DebugLog::http_response(resp.status_code, resp.body);
+    DebugLog::http_response(resp.status_code, resp.body);
 
-      write_response(resp);
-    }
+    write_response(resp);
+
+    FCGX_Finish_r(&request_);
   }
 
   return 0;
@@ -323,69 +294,6 @@ void FcgiServer::shutdown() {
     ::close(listen_fd_);
     listen_fd_ = -1;
   }
-}
-
-FcgiRequest FcgiServer::read_request() {
-  FcgiRequest req;
-
-  // Read FCGI environment variables
-  auto get_env = [](const char* name) -> const char* {
-    const char* val = getenv(name);
-    return val != nullptr ? val : "";
-  };
-
-  req.request_method = get_env("REQUEST_METHOD");
-  req.request_uri = get_env("REQUEST_URI");
-  req.query_string = get_env("QUERY_STRING");
-  req.content_type = get_env("CONTENT_TYPE");
-  req.script_name = get_env("SCRIPT_NAME");
-  req.path_info = get_env("PATH_INFO");
-  req.server_protocol = get_env("SERVER_PROTOCOL");
-
-  // Read request body (for POST data, e.g., filter operations)
-  if (req.request_method == "POST" || req.request_method == "PUT") {
-    const char* content_length_str = getenv("CONTENT_LENGTH");
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    if (content_length_str[0] != '\0') {
-      int content_length = 0;
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-      const char* cl_end = content_length_str + std::strlen(content_length_str);
-      auto [ptr, ec] = std::from_chars(content_length_str, cl_end, content_length);
-      if (ec != std::errc{} || content_length <= 0) {
-        // Invalid or non-positive content length — skip body
-        return req;
-      }
-      // Cap at maximum to prevent OOM on constrained systems
-      if (content_length > kMaxContentLength) {
-        std::cerr << "[WARN] CONTENT_LENGTH " << content_length << " exceeds maximum "
-                  << kMaxContentLength << ", truncating\n";
-        content_length = kMaxContentLength;
-      }
-      const auto max_len = static_cast<size_t>(content_length);
-      req.content.resize(max_len);
-      // Read from FCGI stdin
-      size_t total = 0;
-      while (total < max_len) {
-        const size_t remaining = max_len - total;
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-        const size_t nread = FCGI_fread(req.content.data() + total, 1, remaining, stdin);
-        // fread() returns the number of *items* read, never more than nmemb.
-        // A stream that is not attached to a FastCGI request (direct-socket
-        // mode reuses the FCGX API instead of the FCGI_FILE layer) reports a
-        // meaningless count; adding it to `total` used to overflow, and the
-        // following resize() then threw std::length_error out of run() and
-        // killed the worker.  Clamp instead of trusting the value.
-        if (nread == 0) {
-          break;  // end of the request body
-        }
-        total += std::min(nread, remaining);
-      }
-      // Shrink to actual bytes read (in case of early EOF)
-      req.content.resize(total);
-    }
-  }
-
-  return req;
 }
 
 FcgiRequest FcgiServer::read_request(
@@ -490,15 +398,7 @@ void FcgiServer::write_response(const FcgiResponse& response) {
   output += "\r\n";
   output += response.body;
 
-  if (listen_fd_ >= 0) {
-    // Direct socket mode: write to FCGX request output stream.
-    FCGX_PutStr(output.data(), static_cast<int>(output.size()), request_.out);
-  } else {
-    // Spawn-fcgi mode: write to FCGI stdout.
-    // Note: FCGI_fwrite takes non-const void* (C API), but does not modify the buffer.
-    // The const_cast is safe here as the library only reads from the buffer.
-    FCGI_fwrite(const_cast<char*>(output.data()), 1, output.size(), stdout);
-  }
+  FCGX_PutStr(output.data(), static_cast<int>(output.size()), request_.out);
 }
 
 }  // namespace cvknx

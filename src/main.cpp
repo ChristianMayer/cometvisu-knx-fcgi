@@ -20,9 +20,9 @@
  *
  * This is the equivalent of running eibread-cgi and eibwrite-cgi as a
  * single unified binary, with these key differences:
- *   - Fork-based worker pool instead of spawn-fcgi's multi-instance model
+ *   - Fork-based worker pool instead of running one process per request
  *   - Persistent bus connections instead of per-request connect/disconnect
- *   - Direct socket mode (FCGI_SOCKET) for standalone operation
+ *   - A required listen socket (FCGI_SOCKET) that the workers share
  *   - Load shedding semaphores to prevent long-poll head-of-line blocking
  *   - Signal handling for graceful shutdown (SIGTERM)
  *   - Resource limits (RLIMIT_NOFILE, RLIMIT_AS) for embedded safety
@@ -237,9 +237,9 @@ void print_help() {
             << "  KNX_IP_HEARTBEAT_SEC  ip-tunnel: heartbeat interval (default: 60)\n"
             << "  KNX_IP_ACK_TIMEOUT_MS ip-tunnel: ACK timeout in ms (default: 1000)\n"
             << "  KNX_IP_RETRIES        ip-tunnel: retransmissions (default: 3)\n"
-            << "  FCGI_SOCKET           Direct FCGI socket (unset = spawn-fcgi mode)\n"
-            << "  FCGI_WORKERS          Worker processes in direct socket mode (default: 20, "
-               "max: 256)\n"
+            << "  FCGI_SOCKET           REQUIRED: FCGI listen socket (\":port\" for TCP or a\n"
+               "                        Unix socket path)\n"
+            << "  FCGI_WORKERS          Worker processes (default: 20, max: 256)\n"
             << "  LONGPOLL_TIMEOUT_SEC  Max seconds to wait in long-poll /r (default: 300, max: "
             << kMaxLongpollTimeoutSec << ")\n"
             << "  KNX_TX_MAX_PER_SEC    Max outgoing telegrams per second over ALL clients\n"
@@ -300,8 +300,7 @@ void print_startup_info(const cvknx::BusConfig& bus_config, int longpoll_timeout
   std::cout << "[INFO]   KNX_TRANSPORT        "
             << cvknx::bus_transport_to_string(bus_config.transport) << "\n";
   std::cout << "[INFO]   BUS                  " << bus_config.describe() << "\n";
-  std::cout << "[INFO]   FCGI_SOCKET           "
-            << (*fcgi_socket != '\0' ? fcgi_socket : "(not set, spawn-fcgi mode)") << "\n";
+  std::cout << "[INFO]   FCGI_SOCKET           " << fcgi_socket << "\n";
   std::cout << "[INFO]   FCGI_WORKERS          " << num_workers << "\n";
   std::cout << "[INFO]   LONGPOLL_TIMEOUT_SEC  " << longpoll_timeout << "\n";
   std::cout << "[INFO]   ADDRESS_PREFIX        "
@@ -554,8 +553,8 @@ int run_worker_pool(PoolResources& res, sem_t* load_shed_sem, sem_t* concurrency
   // The parent does not handle FCGI requests — it only supervises the
   // children.  It KEEPS the listen socket open: every worker the supervisor
   // forks later inherits it.  Closing it here (as an earlier version did to
-  // save one fd) makes each replacement worker fall back to spawn-fcgi mode,
-  // exit immediately, and the pool can never recover from a crash.  It also
+  // save one fd) leaves replacement workers without an accept socket, so they
+  // exit immediately and the pool can never recover from a crash.  It also
   // keeps the socket alive for the web server while no worker is accepting, so
   // connections queue in the backlog instead of failing.
 
@@ -749,10 +748,16 @@ int main(int argc, char* argv[]) {
   // When set, the /l endpoint includes a "c" object with "baseURL".
   const char* base_url = std::getenv("BASE_URL");
 
-  // ---- Optional direct socket (standalone mode) ----
-  // Set FCGI_SOCKET to a TCP port (":9000") or Unix socket path to run without
-  // spawn-fcgi.
+  // ---- FCGI listen socket (required) ----
+  // The backend always owns its listen socket: ":port" for TCP or a
+  // filesystem path for a Unix socket.  Serving FastCGI from stdin/stdout is
+  // not supported — the worker pool and the cache reader depend on sharing an
+  // inherited listen fd.
   const char* fcgi_socket = get_env_default("FCGI_SOCKET", "");
+  if (*fcgi_socket == '\0') {
+    std::cerr << "[ERROR] FCGI_SOCKET is required (\":port\" for TCP or a Unix socket path)\n";
+    return 1;
+  }
 
   KnxAddress::set_default_namespace(address_prefix);
   print_startup_info(bus_config, longpoll_timeout, num_workers, fcgi_socket, address_prefix,
@@ -760,38 +765,35 @@ int main(int argc, char* argv[]) {
 
   // ---- Initialize FCGI server (before the bus) ----
   // Set up the FastCGI listen socket first so it's ready for connections before
-  // attempting the potentially slow bus connection.  In spawn-fcgi mode (no
-  // FCGI_SOCKET), the web server handles stdin/stdout.
+  // attempting the potentially slow bus connection.
   FcgiServer server;
-  if (*fcgi_socket != '\0') {
-    if (server.listen(fcgi_socket)) {  // GCOV_EXCL_BR_LINE - see the else comment
-      std::cout << "[INFO] Direct FCGI socket: " << fcgi_socket << "\n";
-      // GCOV_EXCL_START - FCGX_OpenSocket() terminates the process on a bind
-      // failure, so listen() never reports one here.
-    } else {
-      std::cerr << "[ERROR] Failed to open FCGI socket: " << fcgi_socket << "\n";
-      return 1;
+  if (server.listen(fcgi_socket)) {  // GCOV_EXCL_BR_LINE - see the else comment
+    std::cout << "[INFO] Direct FCGI socket: " << fcgi_socket << "\n";
+    // GCOV_EXCL_START - FCGX_OpenSocket() terminates the process on a bind
+    // failure, so listen() never reports one here.
+  } else {
+    std::cerr << "[ERROR] Failed to open FCGI socket: " << fcgi_socket << "\n";
+    return 1;
+  }
+  // GCOV_EXCL_STOP
+
+  // FastCGI has no transport authentication and the handlers trust the web
+  // server to authenticate, so the endpoint itself is the whole access
+  // control.  A filesystem socket inherits the umask (typically 0755, i.e.
+  // connectable by every local user); reduce it to owner/group rw.  A TCP
+  // socket is reachable from the network and must never be exposed.
+  if (fcgi_socket[0] != ':') {
+    // GCOV_EXCL_START - we just created the socket, so chmod cannot fail
+    // unless the directory was replaced between bind and chmod.
+    if (::chmod(fcgi_socket, 0660) != 0) {
+      std::cerr << "[WARN] Cannot restrict the FCGI socket to 0660: " << std::strerror(errno)
+                << "\n";
     }
     // GCOV_EXCL_STOP
-
-    // FastCGI has no transport authentication and the handlers trust the web
-    // server to authenticate, so the endpoint itself is the whole access
-    // control.  A filesystem socket inherits the umask (typically 0755, i.e.
-    // connectable by every local user); reduce it to owner/group rw.  A TCP
-    // socket is reachable from the network and must never be exposed.
-    if (fcgi_socket[0] != ':') {
-      // GCOV_EXCL_START - we just created the socket, so chmod cannot fail
-      // unless the directory was replaced between bind and chmod.
-      if (::chmod(fcgi_socket, 0660) != 0) {
-        std::cerr << "[WARN] Cannot restrict the FCGI socket to 0660: " << std::strerror(errno)
-                  << "\n";
-      }
-      // GCOV_EXCL_STOP
-    } else {
-      std::cerr << "[WARN] FCGI_SOCKET " << fcgi_socket
-                << " listens on a TCP port with no authentication or peer check; keep it on a "
-                   "loopback/reverse-proxy interface or use a Unix socket path\n";
-    }
+  } else {
+    std::cerr << "[WARN] FCGI_SOCKET " << fcgi_socket
+              << " listens on a TCP port with no authentication or peer check; keep it on a "
+                 "loopback/reverse-proxy interface or use a Unix socket path\n";
   }
 
   // ---- Shared state (created before ANY fork) ----
@@ -867,13 +869,7 @@ int main(int argc, char* argv[]) {
   server.set_handler(
       [&router](const FcgiRequest& req) -> FcgiResponse { return router.route(req); });
 
-  if (*fcgi_socket == '\0') {
-    // Spawn-fcgi mode: concurrency is handled by running multiple process
-    // instances via spawn-fcgi (e.g. spawn-fcgi -F N).
-    return server.run();
-  }
-
-  // ---- Direct socket mode: fork-based worker pool ----
+  // ---- Fork-based worker pool ----
   // Each child process runs an independent accept loop on the shared listen
   // socket; the OS serializes accept() across processes.  This avoids Docker
   // < 20.10.10 seccomp issues where clone3/clone with process-sharing flags
