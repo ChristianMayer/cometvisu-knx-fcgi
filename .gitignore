@@ -1,8 +1,6 @@
 # Build
 build/
-build-rel/
-build-noknxd/
-build-cov/
+build-*/
 cmake-build-*/
 
 # IDE

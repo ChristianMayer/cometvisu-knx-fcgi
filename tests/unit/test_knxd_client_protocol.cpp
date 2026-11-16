@@ -351,10 +351,9 @@ TEST_F(KnxdClientProtocolTest, ConnectRejectsAnOverlongSocketPath) {
 }
 
 TEST_F(KnxdClientProtocolTest, ConnectWithoutAnyPathFails) {
-  // An explicitly empty path, not the default one: the default is /run/knx,
-  // and whether a knxd answers there is a property of the *machine* (the CI
-  // runner's package install starts the daemon), not of the client.  What the
-  // test pins down is the guard: no configured path → no connection attempt.
+  // The default path is /run/knx, and whether anything answers there is a
+  // property of the machine, not of the client.  The guard under test is "no
+  // configured path → no connection attempt", so the path is set explicitly.
   KnxdClient client{""};
   EXPECT_FALSE(client.connect());
   EXPECT_FALSE(client.connect());

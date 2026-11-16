@@ -60,6 +60,11 @@ std::string TempSocketPath(const char* tag) {
          std::to_string(counter++) + ".sock";
 }
 
+// The knxd transport can be compiled out (-DKNX_BUILD_KNXD_TRANSPORT=OFF); main()
+// then rejects KNX_TRANSPORT=knxd before it opens any socket, so neither the
+// fake daemon nor its test exists in such a build.
+#ifdef KNX_WITH_KNXD_TRANSPORT
+
 /// Read exactly @p size bytes, or fail on EOF/error.
 bool ReadExactly(int fd, std::uint8_t* data, std::size_t size) {
   std::size_t total = 0;
@@ -161,6 +166,8 @@ private:
   std::atomic<bool> stop_{false};
   std::thread thread_;
 };
+
+#endif  // KNX_WITH_KNXD_TRANSPORT
 
 /// A child process running the backend binary.
 class BackendProcess {
@@ -492,6 +499,7 @@ TEST(MainE2ETest, MissingFcgiSocketIsRejected) {
       << process.output();
 }
 
+#ifdef KNX_WITH_KNXD_TRANSPORT
 /// A transport with connection state is only reported as usable when the
 /// handshake succeeded — and then without the "stateless" note that the
 /// routing transport gets.  A real knxd socket therefore has to exist: the
@@ -509,6 +517,7 @@ TEST(MainE2ETest, ReachableKnxdIsReportedAsUsable) {
   EXPECT_EQ(process.output().find("stateless"), std::string::npos)
       << "the knxd transport has connection state, so the probe proves the bus works";
 }
+#endif  // KNX_WITH_KNXD_TRANSPORT
 
 TEST(MainE2ETest, InvalidNumericSettingsFallBackToSafeValues) {
   Env env = RoutingEnv();

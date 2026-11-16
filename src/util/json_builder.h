@@ -40,9 +40,8 @@ namespace cvknx {
  *
  * Builds JSON strings incrementally with automatic comma insertion (each
  * `add_*` call writes the separator itself, so callers never track whether
- * they are first).  The builder does not validate that objects are balanced —
- * the callers build a fixed, known shape and a runtime check would only add
- * an arm no test could reach.
+ * they are first).  Balance is not validated: every caller emits a fixed,
+ * known shape.
  *
  * Example:
  * @code

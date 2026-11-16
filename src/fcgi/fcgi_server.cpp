@@ -364,10 +364,9 @@ FcgiRequest FcgiServer::read_request(
         const size_t remaining = max_len - total;
         // FCGX_GetStr() reads from this request's stdin stream (`request_.in`)
         // and returns at most `remaining` bytes, 0 at the end of the body and
-        // -1 on error.  The count is clamped anyway: `total` must never exceed
-        // the buffer, because a stream in an unexpected state used to return a
-        // nonsensical count, and adding it overflowed the size passed to
-        // resize() — which threw out of run() and killed the worker.
+        // -1 on error.  The count is clamped so that `total` can never exceed
+        // the buffer: an oversized value would make resize() throw out of run()
+        // and kill the worker.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         const int got = FCGX_GetStr(reinterpret_cast<char*>(req.content.data() + total),
                                     static_cast<int>(remaining), request_.in);

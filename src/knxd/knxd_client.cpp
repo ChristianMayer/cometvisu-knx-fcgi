@@ -107,10 +107,9 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
 /// Shrink a vector if capacity far exceeds usage — prevents memory
 /// retention after traffic bursts on long-running embedded systems.
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
-  // Only the 4x rule is checked: the buffer grows by whole eibd messages, and
-  // a message is at most 64 KiB, so "capacity exceeds size by more than
-  // 64 KiB" cannot happen — such a clause would be dead code no test can
-  // reach (the coverage gate rejected it).
+  // The 4x rule is sufficient: the buffer only ever grows by whole eibd
+  // messages, and a message is at most 64 KiB, so capacity can never exceed
+  // size by more than that.
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
   if (buf.capacity() > static_cast<size_t>(buf.size()) * 4) {
     buf.shrink_to_fit();
@@ -139,7 +138,10 @@ ReadOutcome read_some(int fd, std::vector<uint8_t>& buffer) {
       }
     }
     // GCOV_EXCL_STOP
-    buffer.insert(buffer.end(), tmp.data(), &tmp[static_cast<size_t>(n)]);
+    // A read may fill the chunk completely, so n can equal tmp.size(): the end
+    // of the range must be formed as tmp.data() + n, because indexing tmp[n]
+    // would be out of bounds.
+    buffer.insert(buffer.end(), tmp.data(), tmp.data() + static_cast<size_t>(n));
     return ReadOutcome::Data;
   }
   if (n == 0) {
