@@ -49,6 +49,8 @@ CacheReaderOptions FastOptions() {
   options.reconnect_backoff_ms = 20;
   options.max_reconnect_backoff_ms = 20;
   options.sleep_slice_ms = 2;
+  // Tests that do not exercise the rate limit must not wait for it.
+  options.max_tx_per_sec = 0;
   return options;
 }
 
@@ -467,21 +469,21 @@ TEST(CacheReaderPacing, PacesSendsAndReportsTheRemainingDelay) {
   ASSERT_TRUE(queue.push(0x0A02, {0x00, 0x80, 0x02}));
 
   auto next_send_at = Clock::time_point{};
-  const auto first = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  const auto first = detail::drain_tx_queue(link, queue, {}, 8, 50, next_send_at);
   EXPECT_EQ(first.sent, 1) << "one telegram per interval";
   EXPECT_FALSE(first.failed);
   EXPECT_EQ(queue.size(), 1U) << "the paced telegram must stay queued";
 
   // Immediately afterwards the interval has not elapsed: nothing is sent and
   // the caller is told how long to wait (it must not spin).
-  const auto second = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  const auto second = detail::drain_tx_queue(link, queue, {}, 8, 50, next_send_at);
   EXPECT_EQ(second.sent, 0);
   EXPECT_GT(second.wait_ms, 0);
   EXPECT_EQ(link.sent_packets().size(), 1U);
 
   // After the interval the next telegram goes out.
   std::this_thread::sleep_for(std::chrono::milliseconds(55));
-  const auto third = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  const auto third = detail::drain_tx_queue(link, queue, {}, 8, 50, next_send_at);
   EXPECT_EQ(third.sent, 1);
   EXPECT_EQ(queue.size(), 0U);
   EXPECT_EQ(link.sent_packets().size(), 2U);
@@ -496,7 +498,7 @@ TEST(CacheReaderPacing, UnpacedTransportSendsTheWholeBatchAtOnce) {
     ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A10 + i), {0x00, 0x80, 0x01}));
   }
   auto next_send_at = Clock::time_point{};
-  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, 0, next_send_at);
   EXPECT_EQ(drained.sent, 5);
   EXPECT_EQ(drained.wait_ms, 0);
   EXPECT_EQ(queue.size(), 0U);
@@ -511,7 +513,7 @@ TEST(CacheReaderPacing, BatchSizeBoundsOneDrainCall) {
     ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A20 + i), {0x00, 0x80, 0x01}));
   }
   auto next_send_at = Clock::time_point{};
-  const auto drained = detail::drain_tx_queue(link, queue, {}, 2, next_send_at);
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 2, 0, next_send_at);
   EXPECT_EQ(drained.sent, 2);
   EXPECT_EQ(queue.size(), 3U);
 }
@@ -525,7 +527,7 @@ TEST(CacheReaderPacing, FailedSendLeavesTheTelegramQueued) {
   ASSERT_TRUE(queue.push(0x0A03, {0x00, 0x80, 0x01}));
 
   auto next_send_at = Clock::time_point{};
-  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, next_send_at);
+  const auto drained = detail::drain_tx_queue(link, queue, {}, 8, 0, next_send_at);
   EXPECT_EQ(drained.sent, 0);
   EXPECT_TRUE(drained.failed);
   EXPECT_EQ(queue.size(), 1U) << "a telegram that could not be sent must stay queued";
@@ -553,6 +555,48 @@ TEST(CacheReaderPacing, PacedBacklogDoesNotBusyLoop) {
   EXPECT_EQ(queue.size(), 0U);
   // 150 ms / 20 ms pacing = ~7 loop iterations; a spin would produce hundreds.
   EXPECT_LT(link.wait_calls(), 100) << "the loop spun instead of waiting";
+}
+
+// ===========================================================================
+// Global send rate limit: the cache reader is the only sender, so this limit
+// applies to every client and every worker at once.
+// ===========================================================================
+
+TEST(CacheReaderRateLimit, BoundsTheThroughputOfEveryTelegram) {
+  MockBusLink link;  // the transport itself imposes no interval
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(queue.push(static_cast<std::uint16_t>(0x0A40 + i), {0x00, 0x80, 0x01}));
+  }
+
+  CacheReaderOptions options = FastOptions();
+  options.max_tx_per_sec = 5;  // one telegram per 200 ms
+  const auto start = Clock::now();
+  run_cache_reader(link, cache, &queue, options, [start] { return ElapsedMs(start) > 150; });
+
+  EXPECT_EQ(link.sent_packets().size(), 1U) << "5/s must not put 3 telegrams on the bus in 150 ms";
+  EXPECT_EQ(queue.size(), 2U) << "the rate-limited telegrams stay queued, never dropped";
+}
+
+TEST(CacheReaderRateLimit, ZeroMeansNoAdditionalLimit) {
+  MockBusLink link;
+  SharedGroupCache cache;
+  ASSERT_TRUE(cache.create());
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  ASSERT_TRUE(queue.push(0x0A50, {0x00, 0x80, 0x01}));
+  ASSERT_TRUE(queue.push(0x0A51, {0x00, 0x80, 0x02}));
+
+  CacheReaderOptions options = FastOptions();
+  options.max_tx_per_sec = 0;
+  const auto start = Clock::now();
+  run_cache_reader(link, cache, &queue, options, [start] { return ElapsedMs(start) > 50; });
+
+  EXPECT_EQ(link.sent_packets().size(), 2U);
+  EXPECT_EQ(queue.size(), 0U);
 }
 
 }  // namespace cvknx

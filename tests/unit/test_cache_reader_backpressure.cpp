@@ -35,9 +35,9 @@
 #include <vector>
 
 #include "../../src/bus/bus_link.h"
+#include "../../src/bus/cache_reader.h"
 #include "../../src/bus/shared_tx_bus_link.h"
 #include "../../src/handlers/write_handler.h"
-#include "../../src/bus/cache_reader.h"
 #include "../../src/state/session_store.h"
 #include "../../src/state/shared_group_cache.h"
 #include "../../src/state/shared_tx_queue.h"
@@ -114,6 +114,7 @@ CacheReaderOptions FastOptions() {
   options.reconnect_backoff_ms = 20;
   options.max_reconnect_backoff_ms = 20;
   options.sleep_slice_ms = 2;
+  options.max_tx_per_sec = 0;
   return options;
 }
 
@@ -258,7 +259,7 @@ TEST(WriteHandlerConcurrencyTest, ConcurrentWritesAreAllQueuedExactlyOnce) {
         // is visible in the final queue contents.
         char value[8] = {};
         std::snprintf(value, sizeof(value), "80%02x", i & 0xFF);
-        const std::string query = "a=1/2/" + std::to_string(t * kPerThread + i) + "&v=" + value;
+        const std::string query = "s=0&a=1/2/" + std::to_string(t * kPerThread + i) + "&v=" + value;
         const auto result = handler.handle(query);
         if (result.http_status != 200) {
           ++failures;

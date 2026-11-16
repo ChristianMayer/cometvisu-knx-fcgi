@@ -194,8 +194,11 @@ std::size_t SessionStore::cleanup_locked(std::uint32_t now) {
     if (entries[i].id[0] == '\0') {
       continue;
     }
-    const std::uint32_t age = now - entries[i].created;
-    if (age >= data_->ttl_sec) {
+    // Signed difference: a backwards clock step must not make a session look
+    // expired (the unsigned value would wrap to a huge age).
+    const std::int64_t age =
+        static_cast<std::int64_t>(now) - static_cast<std::int64_t>(entries[i].created);
+    if (age >= static_cast<std::int64_t>(data_->ttl_sec)) {
       entries[i] = SharedSessionEntry{};
       --data_->count;
       ++removed;
@@ -287,7 +290,11 @@ bool SessionStore::is_valid(std::string_view session_id) {
 
   const std::uint32_t now = now_seconds();
   SharedSessionEntry& entry = entry_array(data_)[slot];
-  if (now - entry.created >= data_->ttl_sec) {
+  // Signed difference — see cleanup_locked(): a clock step backwards must not
+  // invalidate every live session.
+  const std::int64_t age =
+      static_cast<std::int64_t>(now) - static_cast<std::int64_t>(entry.created);
+  if (age >= static_cast<std::int64_t>(data_->ttl_sec)) {
     entry = SharedSessionEntry{};
     --data_->count;
     return false;

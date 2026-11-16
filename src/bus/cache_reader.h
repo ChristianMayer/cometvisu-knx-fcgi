@@ -54,6 +54,13 @@ struct CacheReaderOptions {
   /// Minimum interval between two "cannot connect / lost connection" warnings.
   /// knxd may be gone for days; the log must not be flooded meanwhile.
   int retry_log_interval_ms = 30000;
+  /// Hard upper bound on outgoing telegrams per second — across *all* clients
+  /// and *all* workers, because the cache reader is the only process that
+  /// sends.  A buggy or hostile client can queue as much as the TX ring
+  /// accepts; this limit is what keeps the bus itself from being flooded.
+  /// 0 disables the extra limit (tests); production uses 10/s
+  /// (`KNX_TX_MAX_PER_SEC`).
+  int max_tx_per_sec = 10;
 };
 
 /// Pump group telegrams from the bus into the shared cache until should_stop()
@@ -95,8 +102,7 @@ struct TxDrain {
   int wait_ms = 0;
 };
 
-/// Send waiting telegrams into the bus, honouring
-/// `BusLink::min_send_interval_ms()`.
+/// Send waiting telegrams into the bus, honouring @p interval_ms.
 ///
 /// The pacing is expressed as a *wait* (`TxDrain::wait_ms`), never as a sleep
 /// inside the link: an inbound telegram must still be delivered immediately
@@ -105,10 +111,14 @@ struct TxDrain {
 /// @param should_stop Checked between telegrams, so shutdown stays prompt.
 ///        An empty predicate means "never stop".
 /// @param max_batch Upper bound of telegrams per call.
+/// @param interval_ms Minimum interval between two consecutive sends, already
+///        combined from the transport limit and the global rate limit
+///        (`CacheReaderOptions::max_tx_per_sec`); 0 = send as fast as accepted.
 /// @param next_send_at Earliest time the next telegram may go out (loop state,
 ///        updated here).
 [[nodiscard]] TxDrain drain_tx_queue(BusLink& link, SharedTxQueue& queue,
                                      const std::function<bool()>& should_stop, int max_batch,
+                                     int interval_ms,
                                      std::chrono::steady_clock::time_point& next_send_at);
 
 /// Sleep for @p duration_ms, but wake up early when should_stop() becomes true.

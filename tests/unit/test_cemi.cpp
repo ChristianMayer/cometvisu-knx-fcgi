@@ -207,5 +207,13 @@ TEST(CemiTest, ParseEmptyBufferAndNullptr) {
   EXPECT_FALSE(parse_ldata_ind(std::span<const std::uint8_t>{}).has_value());
 }
 
+/// The cEMI length octet is (APDU octets - 1): at most 256 octets fit.  A
+/// longer APDU must be rejected, not encoded with a truncated length.
+TEST(CemiTest, EncodeRejectsAnApduThatDoesNotFitTheLengthOctet) {
+  const Bytes apdu(257, 0x00);
+  EXPECT_TRUE(encode_group_request(0x1102, 0x0A03, apdu).empty());
+  EXPECT_TRUE(encode_group_indication(0x1102, 0x0A03, apdu).empty());
+}
+
 }  // namespace
 }  // namespace cvknx::cemi

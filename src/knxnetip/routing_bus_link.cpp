@@ -48,6 +48,9 @@ constexpr int kReceiveBufferBytes = 2048;
 /// @return std::nullopt when the interface does not exist or has no IPv4
 ///         address — both make it unusable for KNXnet/IP.
 std::optional<std::uint32_t> interface_ipv4(const std::string& name) {
+  if (name.size() >= IFNAMSIZ) {
+    return std::nullopt;  // cannot be represented; never truncate silently
+  }
   const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   // GCOV_EXCL_START - socket() only fails on fd exhaustion
   if (fd < 0) {
@@ -262,6 +265,10 @@ bool RoutingBusLink::poll_group_telegram(std::uint16_t& out_group_addr,
     const ssize_t received = ::recvmsg(fd_, &message, 0);
     if (received <= 0) {
       return false;  // EAGAIN or error — nothing (more) to read
+    }
+    // A truncated control block cannot prove where the datagram was sent.
+    if ((message.msg_flags & MSG_CTRUNC) != 0) {  // GCOV_EXCL_BR_LINE - only IP_PKTINFO is enabled
+      continue;                                   // GCOV_EXCL_LINE
     }
     const auto addressed_to = destination_of(message);
     // GCOV_EXCL_START - a kernel that ignored IP_PKTINFO is a host

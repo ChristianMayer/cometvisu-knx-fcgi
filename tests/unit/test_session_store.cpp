@@ -276,3 +276,21 @@ TEST(SessionStoreRecovery, CreateOnAnUnattachedStoreReturnsNoSession) {
   store.attach(nullptr);
   EXPECT_TRUE(store.create_session(false).empty());
 }
+
+/// A wall clock that steps backwards must not invalidate every session: the
+/// unsigned difference would wrap to ~136 years of age.
+TEST(SessionStoreRecovery, AClockStepBackwardDoesNotExpireSessions) {
+  SessionStore store;
+  const std::string id = store.create_session(false);
+  ASSERT_FALSE(id.empty());
+
+  // Move the creation timestamp into the future (the clock was stepped back).
+  auto* entries = reinterpret_cast<SharedSessionEntry*>(store.data() + 1);
+  for (std::uint32_t i = 0; i < store.data()->capacity; ++i) {
+    if (entries[i].id[0] != '\0') {
+      entries[i].created += 3600;
+    }
+  }
+
+  EXPECT_TRUE(store.is_valid(id));
+}

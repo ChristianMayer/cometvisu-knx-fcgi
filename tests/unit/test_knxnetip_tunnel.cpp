@@ -253,6 +253,62 @@ TEST(TunnelingBusLinkTest, RetransmitsSameSequenceOnMissingAck) {
   EXPECT_FALSE(sent);
 }
 
+/// A "busy, repeat" NACK (status 0x01) is not an acknowledgement: the telegram
+/// must be retransmitted with the same sequence number — and only a real ACK
+/// may report the write as sent.
+TEST(TunnelingBusLinkTest, BusyRepeatAckRetransmitsTheSameSequence) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.ack_timeout_ms = 100;
+  options.retries = 2;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  bool sent = false;
+  std::thread sender([&link, &sent] { sent = link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}); });
+
+  Bytes request;
+  ASSERT_TRUE(router.receive(request));
+  const auto first = knxnetip::parse_tunnelling_request(request);
+  ASSERT_TRUE(first.has_value());
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, first->sequence, 0x01));
+
+  ASSERT_TRUE(router.receive(request)) << "status 0x01 must repeat the telegram";
+  const auto second = knxnetip::parse_tunnelling_request(request);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->sequence, first->sequence) << "a repeat reuses the sequence number";
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, second->sequence));
+
+  sender.join();
+  EXPECT_TRUE(sent) << "the retransmitted telegram was accepted by the device";
+}
+
+/// A "busy, do not repeat" NACK (status 0x02) ends the attempt: no
+/// retransmission and, above all, no reported success.
+TEST(TunnelingBusLinkTest, BusyDropAckFailsTheWriteWithoutRetransmitting) {
+  FakeRouter router;
+  TunnelOptions options = LoopbackOptions(router.port());
+  options.ack_timeout_ms = 100;
+  options.retries = 3;
+  TunnelingBusLink link(options);
+  ASSERT_TRUE(ConnectWithRouter(link, router));
+
+  bool sent = true;
+  std::thread sender([&link, &sent] { sent = link.send_group_packet(0x0A03, {0x00, 0x80, 0x42}); });
+
+  Bytes request;
+  ASSERT_TRUE(router.receive(request));
+  const auto parsed = knxnetip::parse_tunnelling_request(request);
+  ASSERT_TRUE(parsed.has_value());
+  router.reply(knxnetip::build_tunnelling_ack(kChannel, parsed->sequence, 0x02));
+
+  sender.join();
+  EXPECT_FALSE(sent) << "a NACK must never be reported as a successful write";
+
+  Bytes extra;
+  EXPECT_FALSE(router.receive(extra)) << "status 0x02 must not be retransmitted";
+}
+
 TEST(TunnelingBusLinkTest, AcksAndDiscardsDuplicateInbound) {
   FakeRouter router;
   TunnelingBusLink link(LoopbackOptions(router.port()));

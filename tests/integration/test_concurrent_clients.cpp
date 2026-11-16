@@ -38,9 +38,9 @@
 #include <vector>
 
 #include "bus/bus_link.h"
+#include "bus/cache_reader.h"
 #include "bus/shared_tx_bus_link.h"
 #include "fcgi/fcgi_server.h"
-#include "bus/cache_reader.h"
 #include "router/router.h"
 #include "state/session_store.h"
 #include "state/shared_group_cache.h"
@@ -405,6 +405,9 @@ std::vector<pid_t> fork_workers(int num_workers, FcgiServer& server) {
 /// @return The response body, or empty string if all attempts failed.
 std::string fcgi_retry_transaction(const std::string& socket_path, const std::string& query_string,
                                    uint16_t request_id, int max_attempts = 30) {
+  // A read needs a session id (anonymous session "0").
+  const std::string query =
+      query_string.find("s=") == std::string::npos ? query_string + "&s=0" : query_string;
   int delay_ms = 10;
   for (int attempt = 0; attempt < max_attempts; ++attempt) {
     FcgiTestClient client;
@@ -415,7 +418,7 @@ std::string fcgi_retry_transaction(const std::string& socket_path, const std::st
       }
       continue;
     }
-    if (!client.send_get_request(request_id, query_string, "/r")) {
+    if (!client.send_get_request(request_id, query, "/r")) {
       std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
       if (delay_ms < 500) {
         delay_ms *= 2;
@@ -760,7 +763,13 @@ bool fcgi_one_shot(const std::string& socket_path, const std::string& path,
   if (!client.connect(socket_path)) {
     return false;
   }
-  if (!client.send_get_request(request_id, query, path)) {
+  // The protocol requires a session id on /r and /w; the anonymous session is
+  // "0".  A test that wants an invalid session supplies its own.
+  std::string q = query;
+  if ((path == "/r" || path == "/w") && q.find("s=") == std::string::npos) {
+    q += q.empty() ? "s=0" : "&s=0";
+  }
+  if (!client.send_get_request(request_id, q, path)) {
     return false;
   }
   body = client.read_response(request_id);
@@ -792,6 +801,7 @@ TEST_F(ConcurrentClientsTest, ConcurrentWritesReachTheBusExactlyOnce) {
   reader_options.reconnect_backoff_ms = 20;
   reader_options.max_reconnect_backoff_ms = 40;
   reader_options.sleep_slice_ms = 2;
+  reader_options.max_tx_per_sec = 0;  // these tests assert throughput
 
   std::atomic<bool> stop{false};
   std::thread reader([&] {
@@ -931,6 +941,7 @@ TEST_F(ConcurrentClientsTest, LongPollsDoNotDelayWrites) {
   reader_options.reconnect_backoff_ms = 20;
   reader_options.max_reconnect_backoff_ms = 40;
   reader_options.sleep_slice_ms = 2;
+  reader_options.max_tx_per_sec = 0;  // these tests assert throughput
   std::atomic<bool> stop{false};
   std::thread reader([&] {
     run_cache_reader(bus, cache, &queue, reader_options, [&stop] { return stop.load(); });

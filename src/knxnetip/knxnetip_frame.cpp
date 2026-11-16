@@ -24,6 +24,7 @@
 #include <arpa/inet.h>
 
 #include <cstring>
+#include <limits>
 
 namespace cvknx::knxnetip {
 namespace {
@@ -93,6 +94,12 @@ const char* connect_status_text(std::uint8_t status) {
 }
 
 std::vector<std::uint8_t> build_frame(ServiceType service, const std::vector<std::uint8_t>& body) {
+  // The total length field is 16 bits.  Truncating it would emit a frame that
+  // every receiver drops (and that no longer describes its own contents) —
+  // reject the body instead.
+  if (body.size() > std::numeric_limits<std::uint16_t>::max() - kHeaderLength) {
+    return {};
+  }
   const auto total = static_cast<std::uint16_t>(kHeaderLength + body.size());
   std::vector<std::uint8_t> frame;
   frame.reserve(total);

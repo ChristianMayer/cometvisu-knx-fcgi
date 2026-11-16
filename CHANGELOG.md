@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security / hardening
+
+- **`/r` and `/w` now require the protocol's session parameter `s`** and answer
+  `401 {"error":"missing session"}` without it (the anonymous session `"0"` that
+  `/l` returns stays valid).  Authentication itself remains the web server's
+  job; this closes the trivial "omit `s` and skip the check" path.
+- **Global send rate limit**: `KNX_TX_MAX_PER_SEC` (default **10** telegrams per
+  second) bounds the outgoing traffic of *every* client and worker, because the
+  cache reader is the only process that talks to the bus.  `/r?t=0` additionally
+  stops generating `GroupValueRead` telegrams as soon as the TX ring rejects one,
+  instead of hammering a queue that cannot accept them.
+- **Long polls can no longer starve the short requests**: two workers are
+  reserved for `/w` and `/l`, so a full set of blocked `/r` clients cannot delay
+  a switch operation for up to 330 s.
+- **FCGI socket**: a Unix socket is now restricted to `0660` after it is
+  created, and TCP mode (`FCGI_SOCKET=:port`, no authentication and no peer
+  check) logs a warning at startup.
+- **Tunnelling ACK status is honoured**: `TUNNELLING_ACK` `0x01` retransmits the
+  same sequence (as the standard asks), `0x02` drops the telegram and fails the
+  write.  A NACK was previously treated as success, silently losing the write.
+- **Shared memory is fail-safe**: after a robust-mutex recovery (`EOWNERDEAD`)
+  the group cache rebuilds its bucket/LRU structure, every chain and LRU index is
+  range-checked, and stored value lengths from the TX ring / cache are clamped.
+  A worker that dies mid-`push()` can no longer make the other workers read
+  outside the shared slot array.
+- **Debug log**: `u=`/`p=` values are redacted and control characters are
+  replaced, so credentials never reach a log file and a request cannot forge log
+  lines.
+- Smaller hardening: over-long APDUs are rejected by the cEMI and KNXnet/IP
+  encoders instead of being length-truncated, `JSON` strings escape C0 control
+  characters, a too-long `KNX_IP_IFACE` is a startup error, `MSG_CTRUNC` is
+  checked on routing datagrams, and a clock step backwards no longer expires
+  every session.
+
+### Delivery correctness
+
+- **The initial read of `/r` is one atomic snapshot** of values *and* position.
+  Previously the position was read after the values, so a telegram pushed in
+  between was reported as "already delivered" by `i` and never sent.
+- **A delta is delivered before blocking**: telegrams that arrived between two
+  requests are returned immediately instead of waiting for the *next* telegram
+  (which may be hours away on a quiet bus).
+
 ### Breaking changes
 
 - **`KNX_TRANSPORT` is now mandatory.**  There is no default transport: choose
@@ -30,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minutes — it is deliberately independent of the request wait limit.
 - **`KNX_CACHE_CAPACITY`** (default `16384`): number of distinct group
   addresses kept in the shared cache.
+- **`KNX_TX_MAX_PER_SEC`** (default `10`): hard upper bound on outgoing
+  telegrams per second, over all clients and workers (see *Security* above).
 
 - **Direct KNXnet/IP tunnelling** (`KNX_TRANSPORT=ip-tunnel`): the backend is a
   client of a KNX IP interface or router — no knxd required.  Includes the

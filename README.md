@@ -134,8 +134,7 @@ does that for you.
 | `KNX_IP_RETRIES`      | `3`        | `ip-tunnel`: retransmissions per telegram (1–10) |
 | `FCGI_SOCKET`         | *(unset)*  | Direct FCGI socket (`:port` for TCP, or filesystem path for Unix socket). When set, the server runs standalone without `spawn-fcgi`. |
 | `FCGI_WORKERS`        | `20`       | Number of worker processes in direct socket mode (1–256). Each worker handles one concurrent client using `fork()`-based pre-forking. Idle workers cost ~few MB resident RAM each. Workers never open a bus connection of their own — they enqueue writes into the shared TX queue. |
-| `LONGPOLL_TIMEOUT_SEC`| `300`      | Max seconds to wait in long-poll `/r`    |
-| `BASE_URL`            | *(unset)*  | When set, the login (`/l`) response includes a config object `"c"` with `"baseURL"` set to this value. Used by the web server to advertise the URL prefix under which the backend is reachable (e.g. `/proxy/visu`). |
+| `LONGPOLL_TIMEOUT_SEC`| `300`      | Max seconds to wait in long-poll `/r`    || `KNX_TX_MAX_PER_SEC`  | `10`       | Hard upper bound on outgoing telegrams per second over **all** clients and workers (1–1000). The cache reader is the only process that sends, so this limit cannot be bypassed by a client — or by a buggy one — and it protects the bus from flooding. || `BASE_URL`            | *(unset)*  | When set, the login (`/l`) response includes a config object `"c"` with `"baseURL"` set to this value. Used by the web server to advertise the URL prefix under which the backend is reachable (e.g. `/proxy/visu`). |
 | `DEBUG_BACKEND`       | *(unset)*  | Set to `1` to enable debug logging to stderr |
 
 At startup, the server logs the effective values of all configuration
@@ -202,6 +201,29 @@ a `... (truncated, NNNN chars total)` marker.
 See [AGENTS.md](AGENTS.md) for the architecture, the design decisions (worker
 pool, shared cache, transport seam, TX queue) and the coding rules.  Deferred
 work is listed in [ROADMAP.md](ROADMAP.md).
+
+## Security
+
+**The backend performs no authentication of its own.**  `/r` and `/w` require a
+session id (`s`) as defined by the CometVisu protocol, but the credentials sent
+to `/l` are not validated — authentication is the web server's job, and the
+backend must never be reachable without it.  In practice this means:
+
+- Run it under the web server (spawn-fcgi) or behind a reverse proxy that
+  enforces authentication.
+- `FCGI_SOCKET=<path>` creates a Unix socket that the backend restricts to
+  `0660`; the web server user must be in the socket's group.  `FCGI_SOCKET=:port`
+  listens on **all** interfaces with no peer check — the backend logs a warning,
+  and such a setup belongs on a loopback-only interface at most.
+- `KNX_TRANSPORT=ip-routing` accepts any `ROUTING_INDICATION` on the multicast
+group as bus traffic: every host on that LAN can inject group values.  Run it on
+an isolated, trusted VLAN (or use `ip-tunnel` and, eventually, KNX IP Secure —
+see [ROADMAP.md](ROADMAP.md)).
+- `KNX_TX_MAX_PER_SEC` (default 10) caps the outgoing telegram rate over all
+clients; it is a protection against a buggy or hostile client flooding the bus,
+not a substitute for supervision.
+- `DEBUG_BACKEND=1` logs request URIs; the `u`/`p` values of `/l` are redacted,
+but keep such logs protected anyway.
 
 ## License
 

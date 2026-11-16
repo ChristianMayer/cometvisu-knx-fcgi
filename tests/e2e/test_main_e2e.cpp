@@ -30,6 +30,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -609,7 +610,7 @@ TEST(MainE2ETest, WorkerKilledDuringALongPollReturnsItsTokens) {
       << process.output();
 
   // A long-poll occupies the only worker and holds both semaphore tokens.
-  const int client = SendRequestAsync(path, "/r?t=300&a=1/2/3");
+  const int client = SendRequestAsync(path, "/r?t=300&a=1/2/3&s=0");
   ASSERT_GE(client, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
@@ -828,6 +829,43 @@ TEST(MainE2ETest, OldestSessionIsEvictedWhenTheStoreIsFull) {
 
   EXPECT_EQ(process.terminate(), 0);
   ::unlink(path.c_str());
+}
+
+// ================================================================
+// The FCGI endpoint is the only access control
+// ================================================================
+
+/// A filesystem socket inherits the umask (typically 0755, i.e. connectable by
+/// every local user).  The backend narrows it to owner/group rw.
+TEST(MainE2ETest, DirectSocketIsRestrictedToOwnerAndGroup) {
+  const std::string path = TempSocketPath("perms");
+  Env env = RoutingEnv();
+  env.emplace_back("FCGI_SOCKET", path);
+  env.emplace_back("FCGI_WORKERS", "1");
+
+  BackendProcess process({}, env);
+  ASSERT_TRUE(process.wait_for_output("All 1 workers started, supervising children..."))
+      << process.output();
+
+  struct stat info {};
+  ASSERT_EQ(::stat(path.c_str(), &info), 0);
+  EXPECT_EQ(info.st_mode & 0777, 0660) << "the FastCGI socket must not be world accessible";
+
+  EXPECT_EQ(process.terminate(), 0);
+  ::unlink(path.c_str());
+}
+
+/// A TCP listener has no peer check and no authentication; the operator must be
+/// told instead of silently exposing the KNX bus to the network.
+TEST(MainE2ETest, TcpSocketModeWarnsAboutTheMissingAuthentication) {
+  Env env = RoutingEnv();
+  env.emplace_back("FCGI_SOCKET", ":0");
+  env.emplace_back("FCGI_WORKERS", "1");
+
+  BackendProcess process({}, env);
+  EXPECT_TRUE(process.wait_for_output("listens on a TCP port with no authentication"))
+      << process.output();
+  EXPECT_EQ(process.terminate(), 0);
 }
 
 }  // namespace

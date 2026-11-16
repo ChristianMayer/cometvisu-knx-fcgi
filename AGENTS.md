@@ -265,6 +265,13 @@ actual file content (e.g., `#pragma once` or `#include`).
      otherwise never reach the transport's timer.  An unanswered
      `CONNECTIONSTATE_REQUEST` marks the tunnel lost, so `/r` reports the
      outage instead of freezing.
+   - **A `TUNNELLING_ACK` is only an ACK when its status is `0x00`.**
+     `0x01` ("busy, repeat") is handled like a missing ACK so the normal
+     retransmission path repeats the same sequence; `0x02` ("busy, do not
+     repeat") drops the telegram and makes `send_group_packet()` return
+     `false`.  Treating a NACK as success would lose the write silently while
+     `/w` answers 200 — the exact failure mode rule "never claim a success"
+     exists for.
    - **KNXnet/IP service codes are fixed by the standard** (03_08_01 5.*):
      tunnelling is `0x0420`/`0x0421`, routing is `0x0530`/`0x0531`/`0x0532`,
      device configuration is `0x0310`/`0x0311`.  Wrong constants compile and
@@ -324,6 +331,13 @@ actual file content (e.g., `#pragma once` or `#include`).
    - `wait_for_new_data(0)` is a non-blocking "nothing can arrive in zero
      time" and always reports `false`; blocking callers pass a positive
      timeout.
+   - **The table must survive a process death.**  `CacheLock` reports
+     `owner_died()` on `EOWNERDEAD`; `push()`, `get()` and `get_delta()` then
+     call `rebuild_locked()`, which re-links every bucket chain and the LRU
+     list from the slot array and clamps stored lengths.  Every chain index,
+     LRU neighbour and stored `value_len` is range-checked at the point of use:
+     the slots live in memory shared by all workers, so an unchecked torn index
+     is an out-of-bounds access in every worker, not just the one that crashed.
 
 4. **Long-poll**: For `/r` requests, the ReadHandler blocks on the shared
    condition variable via `pthread_cond_timedwait()` instead of polling a bus
@@ -345,6 +359,26 @@ actual file content (e.g., `#pragma once` or `#include`).
    operation.  Tokens are released via RAII (a throwing handler yields HTTP 500
    instead of terminating the worker) and the parent restores the token of a
    worker that died, so the pool cannot shrink permanently.
+
+   **The long-poll semaphores are sized below the pool** (`num_workers - 2`,
+   `longpoll_capacity()` in `main.cpp`): the reservation is what actually keeps
+   `/w` and `/l` servable while `LONGPOLL_TIMEOUT_SEC` worth of `/r` clients are
+   blocked.  Sizing them to the full pool (as an earlier version did) let a
+   handful of readers occupy every worker.
+
+   **Every `/r` and `/w` request must carry the protocol's session parameter
+   `s`.**  A missing `s` answers `401 {"error":"missing session"}`; the
+   anonymous id `"0"` (returned by `/l` without credentials) stays valid.
+   Credentials are *not* validated — see the security model below — but a
+   request without a session must never reach the bus or the cache.
+
+   **The initial read is one atomic snapshot.**  `ReadHandler` takes values and
+   position from a single `get_delta(0, …)` lock acquisition.  Reading the
+   values first and `position()` afterwards loses a telegram pushed in between:
+   the response would report an `i` that already covers it, and no later delta
+   could ever match.  For the same reason the poll loop queries the delta
+   *before* blocking — a client that missed telegrams must not wait for the next
+   one (which may be hours away).
 
 5. **KNX semantic correctness rules** — these are non-negotiable constraints
    that every handler implementation MUST satisfy:
@@ -396,6 +430,14 @@ actual file content (e.g., `#pragma once` or `#include`).
    and the eventfd is always consumed before draining so it cannot stay
    readable forever.
 
+   **The reader also owns the global send rate limit.**  Because exactly one
+   process sends, `KNX_TX_MAX_PER_SEC` (default 10/s) is enforced by a single
+   `interval_ms` derived as `max(link.min_send_interval_ms(), ceil(1000/rate))`
+   and applied by `drain_tx_queue()` as a wait between sends.  A client — or a
+   buggy one retrying in a loop — therefore cannot flood the bus, however many
+   writes it queues; the telegrams stay in the ring (`TxDrain::wait_ms` keeps
+   reception running while the interval elapses).
+
 9. **Bus availability is reported to the client**: the cache reader publishes
    its connection state into the shared memory region
    (`SharedGroupCache::publish_bus_status()`, read back with `bus_status()`):
@@ -433,6 +475,39 @@ actual file content (e.g., `#pragma once` or `#include`).
     - The anonymous session `"0"` is always valid and never occupies a slot.
     - **Authentication is a known, accepted limitation**: `u`/`p` are not
       validated (the backend must sit behind the web server's auth).
+
+## Security Model
+
+**The backend does not authenticate.**  The web server in front of it
+authenticates the user; `/l` accepts `u`/`p` without validating them, and session
+ids come from a per-process `mt19937_64` — they are identifiers, not secrets, and
+are deliberately not required to be cryptographically strong.  Everything below
+is enforced anyway, because each item was a bug rather than a policy choice:
+
+- **The session parameter is mandatory**: `/r` and `/w` answer
+  `401 {"error":"missing session"}` without `s` (the anonymous id `"0"` stays
+  valid).  Omitting it must never skip the check.
+- **The FCGI endpoint is the trust boundary**: a Unix socket is `chmod 0660`
+  after creation; TCP mode (`FCGI_SOCKET=:port`) has no peer check and logs a
+  warning at startup.  Never expose it beyond the reverse proxy.
+- **Bounded work per request**: query strings are capped (256 keys × 4096 values
+  × 8192 pairs), `/r?t=0` stops generating bus reads when the TX ring rejects
+  one, and `KNX_TX_MAX_PER_SEC` caps the outgoing telegram rate globally.
+- **Untrusted input is validated, not trusted**: KNXnet/IP frames must match
+  their length field exactly, cEMI rejects foreign message codes before any
+  offset is computed, APDUs longer than 256 octets are refused, KNXnet/IP total
+  lengths are never truncated, `KNX_IP_IFACE` must be representable, and the
+  debug log redacts `u`/`p` and escapes control characters.
+- **`ip-routing` is unauthenticated by protocol**: any host on the multicast
+  VLAN can inject group values, so it belongs on a trusted network segment.
+  `ip-tunnel` is the safer transport until KNX IP Secure (ROADMAP) exists.
+- **Shared memory is shared between processes**: every index and length read
+  from it is treated as untrusted (see decision 3), and a robust-mutex recovery
+  rebuilds the structure instead of walking a torn chain.
+
+A source review (security audit, 2026-11) found no use-after-free, uninitialised
+read or buffer overflow in the parsers; the remaining risk is deployment, not
+parsing.
 
 ## Knxd Protocol Details
 

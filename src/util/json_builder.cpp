@@ -71,7 +71,17 @@ void JsonBuilder::add_quoted(std::string_view str) {
         buffer_.push_back('t');
         break;
       default:
-        buffer_.push_back(c);
+        // JSON forbids raw control characters.  Nothing untrusted reaches a
+        // JSON string today, but a single unescaped 0x01 would make the whole
+        // response unparsable — escape instead of trusting the caller.
+        if (const auto uc = static_cast<unsigned char>(c); uc < 0x20 || uc == 0x7F) {
+          static constexpr char kHexDigits[] = "0123456789abcdef";
+          buffer_.append("\\u00");
+          buffer_.push_back(kHexDigits[uc >> 4]);
+          buffer_.push_back(kHexDigits[uc & 0x0F]);
+        } else {
+          buffer_.push_back(c);
+        }
         break;
     }
   }

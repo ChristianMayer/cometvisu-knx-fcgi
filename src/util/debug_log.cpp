@@ -30,6 +30,48 @@
 
 namespace cvknx {
 
+namespace {
+
+/// True when @p pos starts a `u=` or `p=` parameter (credentials).
+bool is_credential_parameter(std::string_view text, std::size_t pos) {
+  if (pos != 0) {
+    const char prev = text[pos - 1];
+    if (prev != '&' && prev != '?') {
+      return false;
+    }
+  }
+  return (text[pos] == 'u' || text[pos] == 'p') && pos + 1 < text.size() && text[pos + 1] == '=';
+}
+
+/// Make an externally supplied string safe for a log line.
+///
+/// Two problems with logging raw input:
+///   - a CR/LF (or any control character) lets a client forge log lines and
+///     hide what it did;
+///   - the CometVisu login sends `p=<password>`, which must never be written
+///     to a log file.  Both credentials are redacted here.
+std::string sanitize_for_log(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size();) {
+    if (is_credential_parameter(text, i)) {
+      out.append(std::string_view{text.data() + i, 2});  // keep "u="/"p="
+      out.append("***");
+      i += 2;
+      while (i < text.size() && text[i] != '&') {
+        ++i;  // skip the value
+      }
+      continue;
+    }
+    const auto uc = static_cast<unsigned char>(text[i]);
+    out.push_back((uc < 0x20 || uc == 0x7F) ? '?' : text[i]);
+    ++i;
+  }
+  return out;
+}
+
+}  // namespace
+
 bool DebugLog::enabled_ = false;
 size_t DebugLog::max_uri_length_ = 500;
 size_t DebugLog::max_body_length_ = 1000;
@@ -75,10 +117,11 @@ void DebugLog::http_request(std::string_view method, std::string_view uri) {
   // Build the entire log line in a local buffer to write it atomically.
   // Multiple processes share stderr; building then writing in one call
   // minimises (but cannot completely eliminate) interleaving.
+  const std::string safe_uri = sanitize_for_log(uri);
   std::ostringstream oss;
   write_timestamp(oss);
   oss << "→ HTTP REQUEST: " << method << " ";
-  write_truncated(oss, uri, max_uri_length_);
+  write_truncated(oss, safe_uri, max_uri_length_);
   oss << "\n";
   std::cerr << oss.str() << std::flush;
 }

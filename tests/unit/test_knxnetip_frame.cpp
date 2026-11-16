@@ -272,5 +272,12 @@ TEST(KnxnetIpFrameTest, SearchResponseWithoutDibIsStillUsable) {
   EXPECT_EQ(parsed->individual_address, 0);
 }
 
+TEST(KnxnetIpFrameTest, BuildFrameRejectsABodyThatDoesNotFitTheLengthField) {
+  // The total length field is 16 bits.  Truncating it would emit a frame that
+  // describes different contents than it carries.
+  const std::vector<std::uint8_t> body(70000, 0x00);
+  EXPECT_TRUE(build_frame(ServiceType::RoutingIndication, body).empty());
+}
+
 }  // namespace
 }  // namespace cvknx::knxnetip

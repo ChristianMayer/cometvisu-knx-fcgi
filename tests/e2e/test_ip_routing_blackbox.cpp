@@ -107,8 +107,10 @@ protected:
     }
     BackendOptions options;
     // Several workers: a blocked long-poll must never keep /w from being
-    // served (production defaults to 20).
-    options.workers = 4;
+    // served (production defaults to 20).  Two workers stay reserved for the
+    // short requests, so 8 workers allow 6 concurrent long-polls
+    // (EveryBlockedClientReceivesTheSameTelegram).
+    options.workers = 8;
     options.longpoll_seconds = longpoll_seconds;
     options.env = {{"KNX_TRANSPORT", "ip-routing"},
                    {"KNX_IP_MULTICAST", group_},
@@ -130,10 +132,13 @@ protected:
   }
 
   [[nodiscard]] FcgiResponse read(const std::string& query) const {
-    return cvknx::blackbox::fcgi_request(backend_->socket_path(), "/r?" + query);
+    return cvknx::blackbox::fcgi_request(backend_->socket_path(),
+                                         "/r?" + cvknx::blackbox::with_session(query));
   }
   [[nodiscard]] FcgiResponse write(const std::string& group, const std::string& value) const {
-    return cvknx::blackbox::fcgi_request(backend_->socket_path(), "/w?a=" + group + "&v=" + value);
+    return cvknx::blackbox::fcgi_request(
+        backend_->socket_path(),
+        "/w?" + cvknx::blackbox::with_session("a=" + group + "&v=" + value));
   }
   [[nodiscard]] FcgiResponse cache_only(int sub) const {
     return read("a=" + group_text(sub) + "&t=-1");
@@ -176,7 +181,7 @@ protected:
   [[nodiscard]] std::future<FcgiResponse> async_read(const std::string& query) const {
     const std::string socket = backend_->socket_path();
     return std::async(std::launch::async, [socket, query] {
-      return cvknx::blackbox::fcgi_request(socket, "/r?" + query);
+      return cvknx::blackbox::fcgi_request(socket, "/r?" + cvknx::blackbox::with_session(query));
     });
   }
 
@@ -495,7 +500,7 @@ TEST_F(IpRoutingBlackBox, MultiByteWriteIsPublished) {
 TEST_F(IpRoutingBlackBox, WritingTwoAddressesPublishesBothTelegrams) {
   monitor_->drain();
   const auto response = cvknx::blackbox::fcgi_request(
-      backend_->socket_path(), "/w?a=" + group_text(23) + "&a=" + group_text(24) + "&v=8001");
+      backend_->socket_path(), "/w?a=" + group_text(23) + "&a=" + group_text(24) + "&v=8001&s=0");
   EXPECT_EQ(response.status, 200);
 
   const auto first = backend_frames(group_value(23), 1500, 1);
@@ -544,7 +549,7 @@ TEST_F(IpRoutingBlackBox, InvalidValueIsRejectedAndPublishesNothing) {
 TEST_F(IpRoutingBlackBox, InvalidAddressIsRejectedWithoutSending) {
   monitor_->drain();
   const auto response =
-      cvknx::blackbox::fcgi_request(backend_->socket_path(), "/w?a=not-an-address&v=8001");
+      cvknx::blackbox::fcgi_request(backend_->socket_path(), "/w?a=not-an-address&v=8001&s=0");
   EXPECT_EQ(response.status, 404);
   EXPECT_TRUE(backend_frames(group_value(28), 400).empty());
 }
@@ -595,13 +600,13 @@ TEST_F(IpRoutingBlackBox, WriteIsDeliveredToTheBlockedClientExactlyOnce) {
 TEST_F(IpRoutingBlackBox, WriteFromASecondClientWakesTheFirst) {
   const std::string first_client = backend_->socket_path();
   auto pending = std::async(std::launch::async, [first_client, this] {
-    return cvknx::blackbox::fcgi_request(first_client, "/r?a=" + group_text(32));
+    return cvknx::blackbox::fcgi_request(first_client, "/r?a=" + group_text(32) + "&s=0");
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
   // A second FastCGI connection writes the value.
-  const auto write_response =
-      cvknx::blackbox::fcgi_request(backend_->socket_path(), "/w?a=" + group_text(32) + "&v=8002");
+  const auto write_response = cvknx::blackbox::fcgi_request(
+      backend_->socket_path(), "/w?a=" + group_text(32) + "&v=8002&s=0");
   ASSERT_EQ(write_response.status, 200);
 
   ASSERT_EQ(pending.wait_for(std::chrono::seconds(10)), std::future_status::ready);

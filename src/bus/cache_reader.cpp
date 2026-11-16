@@ -100,19 +100,19 @@ inline constexpr int kMaxTxBatch = 8;
 /// Send waiting telegrams into the bus.
 ///
 /// Clears the eventfd first, so a push during draining re-arms it.  Telegrams
-/// are paced by `BusLink::min_send_interval_ms()`; the pacing is expressed as
-/// a wait *after* the batch, never as a sleep inside the loop, so an inbound
-/// telegram is still delivered immediately (AGENTS.md rule 2).
+/// are paced by @p interval_ms; the pacing is expressed as a wait *after* the
+/// batch, never as a sleep inside the loop, so an inbound telegram is still
+/// delivered immediately (AGENTS.md rule 2).
 ///
 /// @param stop_requested Checked between telegrams, so shutdown stays prompt.
 /// @param next_send_at Earliest time the next telegram may go out (state of
 ///        the loop, updated here).
 TxDrain drain_tx_queue(BusLink& link, SharedTxQueue& queue,
-                       const std::function<bool()>& should_stop, int max_batch,
+                       const std::function<bool()>& should_stop, int max_batch, int interval_ms,
                        std::chrono::steady_clock::time_point& next_send_at) {
   queue.drain_notifications();
   TxDrain result;
-  const auto interval = std::chrono::milliseconds(std::max(0, link.min_send_interval_ms()));
+  const auto interval = std::chrono::milliseconds(std::max(0, interval_ms));
   uint16_t addr = 0;
   std::vector<uint8_t> apdu;
   // An empty predicate means "never stop" (see stop_requested()).
@@ -212,6 +212,17 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
   const int max_backoff_ms = std::max(initial_backoff_ms, options.max_reconnect_backoff_ms);
   const int wait_timeout_ms = std::max(1, options.wait_timeout_ms);
 
+  // Global send pacing.  Exactly one process (this loop) talks to the bus, so
+  // an interval here limits *every* client and *every* worker at once: a
+  // client that asks for thousands of writes — or a buggy one that retries in
+  // a loop — can never flood the bus.  The transport's own minimum interval
+  // is the floor (knxd's IP tunnel drops telegrams sent closer than 50 ms
+  // apart), the global rate limit is the ceiling.
+  // 10/s -> 100 ms, 3/s -> 334 ms (ceil, never faster than requested).
+  const int rate_interval_ms =
+      options.max_tx_per_sec > 0 ? (1000 + options.max_tx_per_sec - 1) / options.max_tx_per_sec : 0;
+  const int tx_interval_ms = std::max(link.min_send_interval_ms(), rate_interval_ms);
+
   int backoff_ms = initial_backoff_ms;
   bool connected = false;
 
@@ -280,7 +291,8 @@ void run_cache_reader(BusLink& link, SharedGroupCache& cache, SharedTxQueue* tx_
     bool send_failed = false;
     int pace_wait_ms = 0;
     if (tx_queue != nullptr) {
-      const auto drained = drain_tx_queue(link, *tx_queue, stop, detail::kMaxTxBatch, next_send_at);
+      const auto drained =
+          drain_tx_queue(link, *tx_queue, stop, detail::kMaxTxBatch, tx_interval_ms, next_send_at);
       sent = drained.sent;
       send_failed = drained.failed;
       pace_wait_ms = drained.wait_ms;

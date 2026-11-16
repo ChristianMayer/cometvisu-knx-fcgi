@@ -43,6 +43,13 @@ namespace {
 
 constexpr int kReceiveBufferBytes = 2048;
 
+/// TUNNELLING_ACK status octets (KNXnet/IP 03_08_01, 3/8/4).
+/// 0x01 ("busy, repeat") is deliberately absent: it is handled like a missing
+/// ACK, which makes the normal retransmission path send the same sequence
+/// again — exactly what the status asks for.
+constexpr std::uint8_t kAckStatusOk = 0x00;
+constexpr std::uint8_t kAckStatusBusyDrop = 0x02;
+
 /// Individual address as A.L.D (source address shown in log lines).
 std::string individual_address_text(std::uint16_t address) {
   return std::to_string((address >> 12) & 0x0F) + "." + std::to_string((address >> 8) & 0x0F) +
@@ -240,6 +247,8 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
 
   // Retransmissions reuse the *same* sequence number (KNXnet/IP rule).
   ack_wait_sequence_ = tx_sequence_;
+  ack_rejected_ = false;
+  ack_status_ = kAckStatusOk;
   for (int attempt = 0; attempt <= options_.retries; ++attempt) {
     const auto request = knxnetip::build_tunnelling_request(channel_, tx_sequence_, cemi);
     if (!send_to_device(request)) {  // GCOV_EXCL_BR_LINE - a local sendto() does not fail
@@ -252,7 +261,7 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
     ack_received_ = false;
     const std::int64_t deadline = now_ms() + std::max(1, options_.ack_timeout_ms);
     for (;;) {
-      if (ack_received_) {
+      if (ack_received_ || ack_rejected_) {
         break;
       }
       if (now_ms() >= deadline) {  // GCOV_EXCL_BR_LINE - the poll timeout ends the wait first
@@ -262,6 +271,11 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
       if (!receive_and_process(std::max(1, remaining))) {
         break;  // nothing readable — retransmit
       }
+    }
+    if (ack_rejected_) {
+      // The interface answered "busy, do not repeat": retransmitting would
+      // make it worse, and reporting success would lose the telegram.
+      break;
     }
     if (ack_received_) {
       tx_sequence_ = static_cast<std::uint8_t>((tx_sequence_ + 1) & 0xFF);
@@ -273,8 +287,14 @@ bool TunnelingBusLink::send_group_packet(std::uint16_t group_addr,
     }
   }
 
-  std::cerr << "[ERROR] " << label() << ": telegram dropped after " << options_.retries
-            << " retransmissions\n";
+  if (ack_rejected_) {
+    std::cerr << "[ERROR] " << label()
+              << ": telegram rejected by the interface (TUNNELLING_ACK status "
+              << static_cast<int>(ack_status_) << ")\n";
+  } else {
+    std::cerr << "[ERROR] " << label() << ": telegram dropped after " << options_.retries
+              << " retransmissions\n";
+  }
   // The sequence is consumed either way: the next telegram must not reuse it.
   tx_sequence_ = static_cast<std::uint8_t>((tx_sequence_ + 1) & 0xFF);
   return false;
@@ -357,7 +377,15 @@ void TunnelingBusLink::process(const std::vector<std::uint8_t>& datagram) {
       }
       state_pending_ = false;
       if (ack->sequence == ack_wait_sequence_) {
-        ack_received_ = true;
+        // Status 0x00 is the only acknowledgement.  0x01 ("busy, repeat") is
+        // left to the retransmission timer, 0x02 ("busy, do not repeat") ends
+        // the attempt — a NACK must never be treated as a successful send.
+        ack_status_ = ack->status;
+        if (ack->status == kAckStatusOk) {
+          ack_received_ = true;
+        } else if (ack->status == kAckStatusBusyDrop) {
+          ack_rejected_ = true;
+        }
       }
       return;
     }

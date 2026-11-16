@@ -62,9 +62,12 @@ public:
     const int rc = ::pthread_mutex_lock(&mutex_);
     owned_ = (rc == 0);
     if (rc == EOWNERDEAD) {
-      // Previous owner died while holding the lock — make it consistent.
+      // Previous owner died while holding the lock.  The critical section may
+      // have been interrupted halfway through a multi-step update, so the
+      // caller has to repair the table — the mutex alone cannot.
       ::pthread_mutex_consistent(&mutex_);
       owned_ = true;
+      owner_died_ = true;
     }
   }
   ~CacheLock() {
@@ -78,10 +81,14 @@ public:
   CacheLock& operator=(CacheLock&&) = delete;
 
   [[nodiscard]] bool acquired() const { return owned_; }
+  /// True when the previous owner died inside the critical section: the data
+  /// structure must be rebuilt before it is used again.
+  [[nodiscard]] bool owner_died() const { return owner_died_; }
 
 private:
   pthread_mutex_t& mutex_;
   bool owned_ = false;
+  bool owner_died_ = false;
 };
 
 }  // namespace
@@ -172,12 +179,21 @@ void SharedGroupCache::attach(SharedCacheData* data) {
 
 // ---- Internal helpers (caller holds the mutex) ----
 
+bool SharedGroupCache::valid_index(int32_t index) const {
+  return index >= 0 && static_cast<std::uint32_t>(index) < data_->capacity;
+}
+
 int32_t SharedGroupCache::find_locked(uint16_t addr) const {
   int32_t index = bucket_array(data_)[bucket_index(data_, addr)];
   const SharedCacheEntry* entries = entry_array(data_);
-  // A chain is terminated by -1 and every index is in range, so this loop is
-  // bounded by the number of entries.
-  while (index >= 0) {
+  // Every chain index must address a slot, and a chain can never be longer
+  // than the table.  Both bounds matter: without them a torn chain (see
+  // rebuild_locked) reads outside the slot array -- shared memory that every
+  // worker maps.
+  for (std::uint32_t hops = 0; index >= 0 && hops < data_->capacity; ++hops) {
+    if (!valid_index(index)) {
+      return -1;  // corrupt chain: treat the address as absent
+    }
     const SharedCacheEntry& entry = entries[index];
     if (entry.addr == addr) {
       return index;
@@ -187,12 +203,56 @@ int32_t SharedGroupCache::find_locked(uint16_t addr) const {
   return -1;
 }
 
+void SharedGroupCache::rebuild_locked() const {
+  const std::uint32_t capacity = data_->capacity;
+  SharedCacheEntry* entries = entry_array(data_);
+  int32_t* buckets = bucket_array(data_);
+  std::fill(buckets, buckets + capacity, -1);
+  data_->lru_head = -1;
+  data_->lru_tail = -1;
+
+  // A count beyond the capacity is itself a symptom of the crash: only the
+  // addressable slots are kept.
+  const std::uint32_t used = std::min(data_->num_entries, capacity);
+  data_->num_entries = used;
+
+  for (std::uint32_t slot = 0; slot < used; ++slot) {
+    SharedCacheEntry& entry = entries[slot];
+    // A torn write can leave a length larger than the value array; a read
+    // would then copy past the slot into the neighbouring one.
+    entry.value_len =
+        static_cast<std::uint16_t>(std::min<std::size_t>(entry.value_len, kMaxSharedValueBytes));
+    entry.hash_next = -1;
+    // Re-link into its bucket chain.
+    const std::size_t bucket = bucket_index(data_, entry.addr);
+    entry.hash_next = buckets[bucket];
+    buckets[bucket] = static_cast<int32_t>(slot);
+    // Re-link at the front of the LRU list (link_front_locked() inlined: the
+    // repair must also be reachable from the const read paths).
+    entry.lru_prev = -1;
+    entry.lru_next = data_->lru_head;
+    if (data_->lru_head >= 0) {
+      entries[data_->lru_head].lru_prev = static_cast<int32_t>(slot);
+    }
+    data_->lru_head = static_cast<int32_t>(slot);
+    if (data_->lru_tail < 0) {
+      data_->lru_tail = static_cast<int32_t>(slot);
+    }
+  }
+}
+
 int32_t SharedGroupCache::allocate_locked() {
   if (data_->num_entries < data_->capacity) {
     return static_cast<int32_t>(data_->num_entries++);
   }
   // Table full: recycle the least recently pushed address.
-  const int32_t victim = data_->lru_tail;
+  int32_t victim = data_->lru_tail;
+  if (!valid_index(victim)) {
+    // The LRU list was torn.  rebuild_locked() re-links every slot, so the
+    // tail below is valid again (the table is full, so it is not empty).
+    rebuild_locked();
+    victim = data_->lru_tail;
+  }
   unlink_bucket_locked(victim);
   unlink_lru_locked(victim);
   ++data_->evictions;
@@ -200,11 +260,17 @@ int32_t SharedGroupCache::allocate_locked() {
 }
 
 void SharedGroupCache::unlink_bucket_locked(int32_t index) {
+  // Precondition: index is a valid slot (allocate_locked() either returns a
+  // free slot or rebuilds the table before choosing the victim).
   SharedCacheEntry* entries = entry_array(data_);
   int32_t* head = &bucket_array(data_)[bucket_index(data_, entries[index].addr)];
   int32_t* link = head;
-  while (*link != index) {
-    // The victim is always in its own chain, so this is guaranteed to end.
+  // The victim is always in its own chain, so this terminates for a healthy
+  // table.  Bound the walk anyway: a corrupt chain must not loop forever.
+  for (std::uint32_t hops = 0; *link != index; ++hops) {
+    if (!valid_index(*link) || hops >= data_->capacity) {
+      return;  // not in its chain: nothing to unlink
+    }
     link = &entries[*link].hash_next;
   }
   *link = entries[index].hash_next;
@@ -213,15 +279,19 @@ void SharedGroupCache::unlink_bucket_locked(int32_t index) {
 void SharedGroupCache::unlink_lru_locked(int32_t index) {
   SharedCacheEntry* entries = entry_array(data_);
   const SharedCacheEntry& entry = entries[index];
-  if (entry.lru_prev >= 0) {
-    entries[entry.lru_prev].lru_next = entry.lru_next;
+  // A torn neighbour index (see rebuild_locked) must not be followed: it
+  // would write outside the slot array, in memory shared by every worker.
+  const int32_t prev = valid_index(entry.lru_prev) ? entry.lru_prev : -1;
+  const int32_t next = valid_index(entry.lru_next) ? entry.lru_next : -1;
+  if (prev >= 0) {
+    entries[prev].lru_next = next;
   } else {
-    data_->lru_head = entry.lru_next;
+    data_->lru_head = next;
   }
-  if (entry.lru_next >= 0) {
-    entries[entry.lru_next].lru_prev = entry.lru_prev;
+  if (next >= 0) {
+    entries[next].lru_prev = prev;
   } else {
-    data_->lru_tail = entry.lru_prev;
+    data_->lru_tail = prev;
   }
   entries[index].lru_prev = -1;
   entries[index].lru_next = -1;
@@ -230,9 +300,9 @@ void SharedGroupCache::unlink_lru_locked(int32_t index) {
 void SharedGroupCache::link_front_locked(int32_t index) {
   SharedCacheEntry* entries = entry_array(data_);
   entries[index].lru_prev = -1;
-  entries[index].lru_next = data_->lru_head;
-  if (data_->lru_head >= 0) {
-    entries[data_->lru_head].lru_prev = index;
+  entries[index].lru_next = valid_index(data_->lru_head) ? data_->lru_head : -1;
+  if (entries[index].lru_next >= 0) {
+    entries[entries[index].lru_next].lru_prev = index;
   }
   data_->lru_head = index;
   if (data_->lru_tail < 0) {
@@ -259,6 +329,9 @@ void SharedGroupCache::push(uint16_t addr, const std::vector<uint8_t>& value) {
       return;
     }
     // GCOV_EXCL_STOP
+    if (lock.owner_died()) {
+      rebuild_locked();
+    }
 
     // Increment the raw counter and store the wrapped position so the
     // client-facing index `i` stays bounded.  Wrapped values are 1-based
@@ -310,6 +383,9 @@ std::optional<std::vector<uint8_t>> SharedGroupCache::get(uint16_t addr, int max
     return std::nullopt;
   }
   // GCOV_EXCL_STOP
+  if (lock.owner_died()) {
+    rebuild_locked();
+  }
 
   std::optional<std::vector<uint8_t>> result;
   const int32_t index = find_locked(addr);
@@ -320,7 +396,9 @@ std::optional<std::vector<uint8_t>> SharedGroupCache::get(uint16_t addr, int max
     const std::int64_t age =
         static_cast<std::int64_t>(std::time(nullptr)) - static_cast<std::int64_t>(entry.timestamp);
     if (max_age_sec < 0 || age < static_cast<std::int64_t>(max_age_sec)) {
-      result.emplace(entry.value, entry.value + entry.value_len);
+      // Clamp: a torn length must never make the copy run past the slot.
+      const std::size_t len = std::min<std::size_t>(entry.value_len, kMaxSharedValueBytes);
+      result.emplace(entry.value, entry.value + len);
     }
   }
   return result;
@@ -340,6 +418,9 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
     return delta;
   }
   // GCOV_EXCL_STOP
+  if (lock.owner_died()) {
+    rebuild_locked();
+  }
 
   // Current wrapped position (0-based, wraps at kPositionModulus).
   delta.position = data_->position.load() % kPositionModulus;
@@ -379,7 +460,9 @@ SharedGroupCache::Delta SharedGroupCache::get_delta(uint32_t since_pos,
         continue;
       }
     }
-    delta.values[addr] = std::vector<uint8_t>(entry.value, entry.value + entry.value_len);
+    // Clamp: a torn length must never make the copy run past the slot.
+    const std::size_t len = std::min<std::size_t>(entry.value_len, kMaxSharedValueBytes);
+    delta.values[addr] = std::vector<uint8_t>(entry.value, entry.value + len);
   }
   return delta;
 }

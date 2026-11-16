@@ -145,3 +145,19 @@ TEST(JsonBuilderTest, EscapesControlCharacters) {
   EXPECT_NE(text.find("\\r"), std::string::npos) << text;
   EXPECT_NE(text.find("\\t"), std::string::npos) << text;
 }
+
+// A raw C0 control character is not valid inside a JSON string.  Escape it so a
+// single odd byte can never make the whole response unparsable.
+TEST(JsonBuilderTest, ControlCharactersAreEscaped) {
+  JsonBuilder jb;
+  jb.start_object();
+  jb.add_string("k", std::string{"a\x01"
+                                 "b\x1f"
+                                 "c\x7f"});
+  jb.end_object();
+
+  const std::string text = jb.str();
+  EXPECT_NE(text.find("\\u0001"), std::string::npos) << text;
+  EXPECT_NE(text.find("\\u001f"), std::string::npos) << text;
+  EXPECT_NE(text.find("\\u007f"), std::string::npos) << text;
+}

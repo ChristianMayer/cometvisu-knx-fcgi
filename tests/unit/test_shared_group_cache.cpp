@@ -266,6 +266,21 @@ TEST_F(SharedGroupCacheTest, AgeFilterRejectsStaleEntries) {
   // and get.
 }
 
+TEST_F(SharedGroupCacheTest, AgeFilterAcceptsFreshEntries) {
+  cache_.push(0x0A03, {0x42});
+  // A generous age filter must not hide a value that was just pushed.
+  const auto val = cache_.get(0x0A03, 3600);
+  ASSERT_TRUE(val.has_value());
+  EXPECT_EQ(*val, (std::vector<uint8_t>{0x42}));
+}
+
+// A cache that was never created (or attached) must answer instead of crashing:
+// every accessor is defensive about it.
+TEST(SharedCacheDefaultState, PositionOfAnUninitialisedCacheIsZero) {
+  SharedGroupCache cache;
+  EXPECT_EQ(cache.position(), 0U);
+}
+
 // ================================================================
 // Notification (condition variable)
 // ================================================================
@@ -717,4 +732,115 @@ TEST_F(SmallCacheTest, EvictsAnEntryInsideAHashChain) {
   EXPECT_FALSE(cache_.get(0x0A01).has_value());
   EXPECT_TRUE(cache_.get(0x0A05).has_value());
   EXPECT_TRUE(cache_.get(0x0A04).has_value());
+}
+
+// ================================================================
+// Torn shared state (what a process that died mid-push leaves behind)
+// ================================================================
+//
+// The table lives in memory shared by every worker, and data() is public, so
+// these tests can reproduce exactly the state a crash between two updates of
+// push() leaves behind.  Every accessor must fail safe — treat the address as
+// absent and keep serving — instead of indexing outside the slot array.
+
+namespace {
+
+/// Mirror of the layout helpers in shared_group_cache.cpp.
+int32_t* BucketHeads(SharedCacheData* data) {
+  return reinterpret_cast<int32_t*>(data + 1);
+}
+
+SharedCacheEntry* Slots(SharedCacheData* data) {
+  return reinterpret_cast<SharedCacheEntry*>(BucketHeads(data) + data->capacity);
+}
+
+}  // namespace
+
+TEST_F(SmallCacheTest, AnOutOfRangeChainIndexIsTreatedAsAbsent) {
+  cache_.push(0x0A03, {0x42});
+  // A chain head outside the slot array: nothing may be dereferenced.
+  BucketHeads(cache_.data())[0x0A03 % cache_.data()->capacity] = 4242;
+
+  EXPECT_FALSE(cache_.get(0x0A03).has_value());
+  EXPECT_FALSE(cache_.get(0x0A07).has_value());  // same bucket
+  EXPECT_TRUE(cache_.get_delta(0, {0x0A03}).values.empty());
+}
+
+TEST_F(SmallCacheTest, ACyclicHashChainTerminates) {
+  cache_.push(0x0A03, {0x42});
+  Slots(cache_.data())[0].hash_next = 0;  // points at itself
+
+  // Looking up another address of the bucket walks the cycle and must give up
+  // after a bounded number of hops.
+  EXPECT_FALSE(cache_.get(0x0A07).has_value());
+  EXPECT_TRUE(cache_.get(0x0A03).has_value());
+}
+
+TEST_F(SmallCacheTest, AnOversizedStoredLengthIsClampedWhenRead) {
+  cache_.push(0x0A03, {0x01, 0x02});
+  Slots(cache_.data())[0].value_len = 400;  // torn length field
+
+  const auto value = cache_.get(0x0A03);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(value->size(), kMaxSharedValueBytes) << "the copy must stop at the value array";
+
+  const auto delta = cache_.get_delta(0, {0x0A03});
+  ASSERT_EQ(delta.values.count(0x0A03), 1U);
+  EXPECT_EQ(delta.values.at(0x0A03).size(), kMaxSharedValueBytes);
+}
+
+TEST_F(SmallCacheTest, ATornLruTailIsRebuiltBeforeEviction) {
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A02, {0x02});
+  cache_.push(0x0A03, {0x03});
+  cache_.push(0x0A05, {0x05});
+  cache_.data()->lru_tail = -1;  // crash between unlink and re-link
+
+  cache_.push(0x0A04, {0x04});  // must rebuild, not index at -1
+
+  EXPECT_TRUE(cache_.get(0x0A04).has_value());
+  EXPECT_EQ(cache_.size(), 4U);
+}
+
+TEST_F(SmallCacheTest, ATornLruNeighbourIsNotFollowed) {
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A02, {0x02});
+  cache_.push(0x0A03, {0x03});
+  cache_.push(0x0A05, {0x05});
+  // The eviction victim is 0x0A01 (slot 0); tear both of its neighbours.
+  Slots(cache_.data())[0].lru_prev = 4000;
+  Slots(cache_.data())[0].lru_next = 4000;
+
+  cache_.push(0x0A04, {0x04});
+
+  EXPECT_TRUE(cache_.get(0x0A04).has_value());
+  EXPECT_FALSE(cache_.get(0x0A01).has_value());
+}
+
+TEST_F(SmallCacheTest, ATornChainDuringEvictionIsNotWalkedOutOfRange) {
+  cache_.push(0x0A03, {0x03});  // slot 0, bucket 3
+  cache_.push(0x0A07, {0x07});  // slot 1, bucket 3, chain head
+  cache_.push(0x0A01, {0x01});
+  cache_.push(0x0A02, {0x02});               // table full; victim is 0x0A03 (slot 0)
+  Slots(cache_.data())[1].hash_next = 4000;  // torn link in the victim's bucket
+
+  cache_.push(0x0A06, {0x06});
+
+  EXPECT_TRUE(cache_.get(0x0A06).has_value());
+  EXPECT_FALSE(cache_.get(0x0A03).has_value());
+}
+
+TEST_F(SmallCacheTest, ACyclicChainDuringEvictionTerminates) {
+  cache_.push(0x0A03, {0x03});  // slot 0, bucket 3 (the victim)
+  cache_.push(0x0A07, {0x07});  // slot 1, bucket 3
+  cache_.push(0x0A0B, {0x0B});  // slot 2, bucket 3, chain head
+  cache_.push(0x0A01, {0x01});  // slot 3, table full
+  // The chain never reaches the victim: 2 -> 1 -> 2 -> ...
+  Slots(cache_.data())[2].hash_next = 1;
+  Slots(cache_.data())[1].hash_next = 2;
+
+  cache_.push(0x0A06, {0x06});  // the unlink walk must give up after capacity hops
+
+  EXPECT_TRUE(cache_.get(0x0A06).has_value());
+  EXPECT_FALSE(cache_.get(0x0A03).has_value());
 }

@@ -41,6 +41,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -93,6 +94,14 @@ inline constexpr rlim_t kMaxWorkerMemoryBytes = 64ULL * 1024 * 1024;
 
 /// Accepted range for LONGPOLL_TIMEOUT_SEC / SESSION_TTL_SEC.
 inline constexpr int kMaxSessionTtlSec = 7 * 24 * 60 * 60;
+
+/// Workers that stay free for the short requests (`/w`, `/l`).
+///
+/// A long-poll may block a worker for up to kMaxClientWaitSec seconds, so the
+/// long-poll semaphores are deliberately sized *below* the pool size: without
+/// the reserve a handful of `/r` clients would occupy every worker and a
+/// switch press would wait in the listen backlog until a poll returned.
+inline constexpr int kReservedWorkers = 2;
 
 // ---- Signal handling ----
 // Signal handlers run in a restricted context (only async-signal-safe
@@ -233,6 +242,8 @@ void print_help() {
                "max: 256)\n"
             << "  LONGPOLL_TIMEOUT_SEC  Max seconds to wait in long-poll /r (default: 300, max: "
             << kMaxLongpollTimeoutSec << ")\n"
+            << "  KNX_TX_MAX_PER_SEC    Max outgoing telegrams per second over ALL clients\n"
+            << "                        (default: 10, max: 1000)\n"
             << "  SESSION_TTL_SEC       Lifetime of a session in seconds (default: 1800)\n"
             << "  SESSION_MAX           Max concurrent sessions, oldest evicted (default: 10000)\n"
             << "  KNX_CACHE_CAPACITY    Distinct group addresses kept in the cache, least\n"
@@ -329,6 +340,15 @@ sem_t* create_shared_semaphore(int initial, const char* name) {
   return sem;
 }
 
+/// How many requests may block in a long-poll at the same time.
+///
+/// Slightly below the pool size so the short requests always find a free
+/// worker (see kReservedWorkers).  At least one long-poll must stay possible,
+/// otherwise a single-worker pool could never serve `/r`.
+int longpoll_capacity(int num_workers) {
+  return std::max(1, num_workers - kReservedWorkers);
+}
+
 /// Everything a forked child needs.  All of it lives in the parent and is
 /// inherited; nothing here may be a process-private copy of shared state.
 struct PoolResources {
@@ -382,6 +402,11 @@ pid_t spawn_cache_reader(PoolResources& res) {
     std::cout << std::flush;
 
     cvknx::CacheReaderOptions reader_options;
+    // Global send rate limit: the cache reader is the only process that hands
+    // telegrams to the bus, so this bounds the traffic of *every* client and
+    // every worker at once.  A client that writes thousands of addresses, or
+    // one that retries in a loop, can therefore never flood the bus.
+    reader_options.max_tx_per_sec = parse_env_int("KNX_TX_MAX_PER_SEC", 10, 1, 1000);
     cvknx::run_cache_reader(*reader_link, res.cache, &res.tx_queue, reader_options,
                             [] { return g_shutdown_requested != 0; });
 
@@ -611,8 +636,8 @@ int run_worker_pool(PoolResources& res, sem_t* load_shed_sem, sem_t* concurrency
       if (worker_pids[i] != waited) {
         continue;
       }
-      restore_semaphore(concurrency_sem, num_workers);
-      restore_semaphore(load_shed_sem, num_workers);
+      restore_semaphore(concurrency_sem, longpoll_capacity(num_workers));
+      restore_semaphore(load_shed_sem, longpoll_capacity(num_workers));
 
       std::cerr << "[WARN] Worker " << i << " (pid=" << waited << ") died — restarting it\n";
       ::usleep(static_cast<useconds_t>(worker_backoff[i].on_death()) * 1000);
@@ -748,6 +773,25 @@ int main(int argc, char* argv[]) {
       return 1;
     }
     // GCOV_EXCL_STOP
+
+    // FastCGI has no transport authentication and the handlers trust the web
+    // server to authenticate, so the endpoint itself is the whole access
+    // control.  A filesystem socket inherits the umask (typically 0755, i.e.
+    // connectable by every local user); reduce it to owner/group rw.  A TCP
+    // socket is reachable from the network and must never be exposed.
+    if (fcgi_socket[0] != ':') {
+      // GCOV_EXCL_START - we just created the socket, so chmod cannot fail
+      // unless the directory was replaced between bind and chmod.
+      if (::chmod(fcgi_socket, 0660) != 0) {
+        std::cerr << "[WARN] Cannot restrict the FCGI socket to 0660: " << std::strerror(errno)
+                  << "\n";
+      }
+      // GCOV_EXCL_STOP
+    } else {
+      std::cerr << "[WARN] FCGI_SOCKET " << fcgi_socket
+                << " listens on a TCP port with no authentication or peer check; keep it on a "
+                   "loopback/reverse-proxy interface or use a Unix socket path\n";
+    }
   }
 
   // ---- Shared state (created before ANY fork) ----
@@ -840,9 +884,9 @@ int main(int argc, char* argv[]) {
   // up in the listen backlog (which the reverse proxy reports as 502).
   // Writes and logins never take a token — a spurious 503 would surface in
   // CometVisu as a failed switch operation.
-  sem_t* load_shed_sem = create_shared_semaphore(num_workers, "load-shed");
+  sem_t* load_shed_sem = create_shared_semaphore(longpoll_capacity(num_workers), "load-shed");
   server.set_load_shed_semaphore(load_shed_sem);
-  sem_t* concurrency_sem = create_shared_semaphore(num_workers, "concurrency");
+  sem_t* concurrency_sem = create_shared_semaphore(longpoll_capacity(num_workers), "concurrency");
   server.set_concurrency_semaphore(concurrency_sem);
 
   PoolResources resources{server, bus_config, shared_cache, tx_queue, worker_link, num_workers};

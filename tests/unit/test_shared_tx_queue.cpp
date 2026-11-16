@@ -155,5 +155,22 @@ TEST(SharedTxQueueTest, RobustMutexRecoversWhenOwnerDies) {
   EXPECT_EQ(queue.size(), 1U);
 }
 
+/// A process that dies mid-push can leave a length byte that does not match the
+/// slot; dequeuing must clamp it instead of copying into the next slots.
+TEST(SharedTxQueueTest, ATornLengthIsClampedWhenDequeued) {
+  SharedTxQueue queue;
+  ASSERT_TRUE(queue.create());
+  ASSERT_TRUE(queue.push(0x0A03, {0x00, 0x80, 0x42}));
+  queue.data()->slots[0].len = 200;
+
+  std::uint16_t addr = 0;
+  Bytes apdu;
+  ASSERT_TRUE(queue.peek(addr, apdu));
+  EXPECT_EQ(apdu.size(), kMaxTxValueBytes);
+
+  ASSERT_TRUE(queue.pop(addr, apdu));
+  EXPECT_EQ(apdu.size(), kMaxTxValueBytes);
+}
+
 }  // namespace
 }  // namespace cvknx

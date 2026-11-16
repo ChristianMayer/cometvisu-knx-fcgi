@@ -35,6 +35,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
@@ -377,7 +378,7 @@ FcgiRequest FcgiServer::read_request() {
         if (nread == 0) {
           break;  // end of the request body
         }
-        total += nread;
+        total += std::min(nread, remaining);
       }
       // Shrink to actual bytes read (in case of early EOF)
       req.content.resize(total);
@@ -469,7 +470,7 @@ FcgiRequest FcgiServer::read_request(
         if (nread == 0) {
           break;  // end of the request body
         }
-        total += nread;
+        total += std::min(nread, remaining);
       }
       req.content.resize(total);
     }

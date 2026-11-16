@@ -24,6 +24,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <new>
@@ -140,6 +141,11 @@ bool SharedTxQueue::push(std::uint16_t group_addr, const std::vector<std::uint8_
     return false;
   }
   QueueLock lock(data_->mutex);
+  // GCOV_EXCL_START - a hard lock error needs a corrupted mutex
+  if (!lock.acquired()) {
+    return false;  // never mutate the ring without the lock
+  }
+  // GCOV_EXCL_STOP
   const std::uint32_t next = (data_->tail + 1) % kTxQueueCapacity;
   if (next == data_->head) {
     ++data_->dropped;
@@ -160,12 +166,18 @@ bool SharedTxQueue::pop(std::uint16_t& out_group_addr, std::vector<std::uint8_t>
     return false;
   }
   QueueLock lock(data_->mutex);
+  // GCOV_EXCL_START - a hard lock error needs a corrupted mutex
+  if (!lock.acquired()) {
+    return false;
+  }
+  // GCOV_EXCL_STOP
   if (data_->head == data_->tail) {
     return false;
   }
   const TxSlot& slot = data_->slots[data_->head];
   out_group_addr = slot.group_addr;
-  out_apdu.assign(slot.data, slot.data + slot.len);
+  // Clamp: a torn length byte must not copy past the slot into its neighbour.
+  out_apdu.assign(slot.data, slot.data + std::min<std::size_t>(slot.len, kMaxTxValueBytes));
   data_->head = (data_->head + 1) % kTxQueueCapacity;
   return true;
 }
@@ -175,6 +187,11 @@ std::size_t SharedTxQueue::size() const {
     return 0;
   }
   QueueLock lock(data_->mutex);
+  // GCOV_EXCL_START - a hard lock error needs a corrupted mutex
+  if (!lock.acquired()) {
+    return 0;
+  }
+  // GCOV_EXCL_STOP
   if (data_->tail >= data_->head) {
     return data_->tail - data_->head;
   }
@@ -186,12 +203,18 @@ bool SharedTxQueue::peek(std::uint16_t& out_group_addr, std::vector<std::uint8_t
     return false;
   }
   QueueLock lock(data_->mutex);
+  // GCOV_EXCL_START - a hard lock error needs a corrupted mutex
+  if (!lock.acquired()) {
+    return false;
+  }
+  // GCOV_EXCL_STOP
   if (data_->head == data_->tail) {
     return false;
   }
   const TxSlot& slot = data_->slots[data_->head];
   out_group_addr = slot.group_addr;
-  out_apdu.assign(slot.data, slot.data + slot.len);
+  // Clamp: a torn length byte must not copy past the slot into its neighbour.
+  out_apdu.assign(slot.data, slot.data + std::min<std::size_t>(slot.len, kMaxTxValueBytes));
   return true;
 }
 
@@ -200,6 +223,11 @@ void SharedTxQueue::pop_drop() {
     return;
   }
   QueueLock lock(data_->mutex);
+  // GCOV_EXCL_START - a hard lock error needs a corrupted mutex
+  if (!lock.acquired()) {
+    return;
+  }
+  // GCOV_EXCL_STOP
   if (data_->head != data_->tail) {
     data_->head = (data_->head + 1) % kTxQueueCapacity;
   }

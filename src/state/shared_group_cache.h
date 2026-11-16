@@ -185,7 +185,9 @@ public:
   /// Current position (lock-free, wraps at kPositionModulus).
   /// Returns the pushed_at of the most recently pushed entry (1-based),
   /// or 0 if no entries have been pushed yet.
-  [[nodiscard]] uint32_t position() const { return data_->position.load() % kPositionModulus; }
+  [[nodiscard]] uint32_t position() const {
+    return data_ == nullptr ? 0 : data_->position.load() % kPositionModulus;
+  }
 
   /// Block until new data arrives or the timeout expires.
   /// Uses the process-shared condition variable — zero CPU while waiting.
@@ -241,6 +243,20 @@ private:
 
   /// Slot index holding @p addr, or -1.
   [[nodiscard]] int32_t find_locked(uint16_t addr) const;
+  /// True when @p index addresses a slot of the table.
+  [[nodiscard]] bool valid_index(int32_t index) const;
+  /// Rebuild every bucket chain and the LRU list from the slot array.
+  ///
+  /// A process that dies while holding the robust mutex can leave the table
+  /// half-updated (a chain pointing at a recycled slot, a dangling LRU tail,
+  /// a length field from a torn write).  Dropping the cached values by
+  /// rebuilding the structure is always better than traversing a corrupt
+  /// chain: the cache is repopulated by the next telegrams, a corrupt table
+  /// would crash or wedge every worker.
+  ///
+  /// `const` only because the read paths (get/get_delta) must repair too — it
+  /// mutates the shared region behind `data_`, not this object.
+  void rebuild_locked() const;
   /// A free slot: recycles the LRU entry when the table is full.
   [[nodiscard]] int32_t allocate_locked();
   /// Remove @p index from its bucket chain.

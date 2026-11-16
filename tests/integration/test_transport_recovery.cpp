@@ -270,6 +270,8 @@ CacheReaderOptions ReaderOptions() {
   options.reconnect_backoff_ms = 20;
   options.max_reconnect_backoff_ms = 40;
   options.sleep_slice_ms = 2;
+  // Faster than the production 10/s: these tests assert throughput.
+  options.max_tx_per_sec = 0;
   return options;
 }
 

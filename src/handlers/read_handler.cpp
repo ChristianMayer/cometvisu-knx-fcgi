@@ -87,19 +87,28 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     return result;
   }
 
+  // ---- Session: the protocol requires `s` on every request ----
+  // A request without a session id is not a read: answer 401 instead of
+  // serving values to a client that never logged in.  The anonymous session
+  // "0" (returned by /l when no credentials are sent) is a valid session id.
+  const auto session = params.get("s");
+  if (!session) {
+    result.http_status = 401;
+    result.body = R"({"error":"missing session"})";
+    return result;
+  }
+  if (!sessions_.is_valid(*session)) {
+    result.http_status = 401;
+    result.body = R"({"error":"invalid session"})";
+    return result;
+  }
+
   // ---- Parse parameters ----
   const auto addresses = params.get_all("a");
   if (addresses.empty()) {
     result.http_status = 400;
     result.body = R"({"error":"missing address"})";
     return result;
-  }
-  if (auto s_opt = params.get("s")) {
-    if (!sessions_.is_valid(*s_opt)) {
-      result.http_status = 401;
-      result.body = R"({"error":"invalid session"})";
-      return result;
-    }
   }
   // ---- Parse t= parameter (poll timeout AND age filter) ----
   // Per spec (https://github.com/CometVisu/CometVisu/wiki/Protokoll):
@@ -183,14 +192,21 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
   //   t > 0         → t  (spec: "maximal TIMEOUT Sekunden alt")
   //   t < 0         → -1 (no age filter, "nur aus dem Cache")
   if (lastpos == 0) {
+    // One atomic snapshot: values and position are read under the same lock.
+    // Reading the values first and the position afterwards loses a telegram
+    // that is pushed in between — the reported `i` would already cover it, so
+    // the value could never be delivered (no later delta matches it).
+    const auto snapshot = cache_.get_delta(0, eib_addrs, max_age_sec);
+    // Iterate the requested addresses (not the returned hash map) so the JSON
+    // key order stays deterministic.
     for (auto addr : eib_addrs) {
-      auto cached = cache_.get(addr, max_age_sec);
-      if (cached) {
-        json.add_string(addr_key(addr), hex_encode(cached->data(), cached->size()));
+      const auto it = snapshot.values.find(addr);
+      if (it != snapshot.values.end()) {
+        json.add_string(addr_key(addr), hex_encode(it->second.data(), it->second.size()));
         already_written.insert(addr);
       }
     }
-    lastpos = cache_.position();
+    lastpos = snapshot.position;
   }
 
   // ---- t=0: send GroupValueRead for uncached addresses ----
@@ -202,8 +218,15 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     // Build GroupValueRead APDU: [0x00, 0x00] = A_GroupValue_Read
     const std::vector<uint8_t> read_apdu = {0x00, 0x00};
     for (auto addr : eib_addrs) {
-      if (!already_written.contains(addr)) {
-        knxd_.send_group_packet(addr, read_apdu);
+      if (already_written.contains(addr)) {
+        continue;
+      }
+      if (!knxd_.send_group_packet(addr, read_apdu)) {
+        // The bus is unreachable or the shared TX ring is full.  Generating
+        // more telegrams would only hammer a queue that cannot accept them;
+        // these bus reads are best effort (the answer already carries the
+        // cached values), so stop here instead of flooding the ring.
+        break;
       }
     }
   }
@@ -216,7 +239,7 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     timeout_sec = 0;
   }
 
-  // ---- Poll loop — wait on shared condition variable, query delta ----
+  // ---- Poll loop — query delta, then wait on the shared condition variable ----
   auto tstart = std::chrono::steady_clock::now();
   bool written = !already_written.empty();
 
@@ -226,22 +249,10 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
       break;
     }
 
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - tstart)
-            .count();
-    int remaining = timeout_sec - static_cast<int>(elapsed);
-    if (remaining <= 0) {
-      break;
-    }
-
-    // Block on the shared condition variable — zero CPU.
-    // Wakes immediately when the cache reader pushes new data.
-    bool new_data = cache_.wait_for_new_data(remaining * 1000);
-    if (!new_data) {
-      break;
-    }
-
-    // Query cache for entries newer than the client's last-known position.
+    // Query the cache for entries newer than the client's last-known position
+    // *before* blocking.  Telegrams that arrived between two requests are
+    // already in the cache; waiting for the condition variable first would
+    // delay them until the next telegram — on a quiet bus possibly for hours.
     // max_age_sec follows the spec:
     //   t > 0 → entries ≤ t seconds old; t=0/t<0/no-t → no age filter.
     // The position-based filter (pushed_at > lastpos) guarantees we only
@@ -261,6 +272,21 @@ ReadResult ReadHandler::handle(std::string_view query_string) {
     lastpos = delta.position;
 
     if (written) {
+      break;
+    }
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - tstart)
+            .count();
+    int remaining = timeout_sec - static_cast<int>(elapsed);
+    if (remaining <= 0) {
+      break;
+    }
+
+    // Block on the shared condition variable — zero CPU.
+    // Wakes immediately when the cache reader pushes new data.
+    bool new_data = cache_.wait_for_new_data(remaining * 1000);
+    if (!new_data) {
       break;
     }
   }

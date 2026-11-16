@@ -94,8 +94,9 @@ protected:
                                                       int longpoll_seconds = 20) const {
     BackendOptions options;
     // Several workers: a blocked long-poll must never keep /w from being
-    // served (production defaults to 20).
-    options.workers = 4;
+    // served (production defaults to 20).  Two of them are reserved for the
+    // short requests, so 8 workers leave 6 slots for concurrent long-polls.
+    options.workers = 8;
     options.longpoll_seconds = longpoll_seconds;
     options.env = {{"KNX_TRANSPORT", "ip-tunnel"},
                    {"KNX_IP_HOST", "127.0.0.1"},
@@ -116,7 +117,8 @@ protected:
   [[nodiscard]] std::string group_text(int sub) const { return "1/2/" + std::to_string(sub); }
 
   [[nodiscard]] FcgiResponse read(const Backend& backend, const std::string& query) const {
-    return cvknx::blackbox::fcgi_request(backend.socket_path(), "/r?" + query);
+    return cvknx::blackbox::fcgi_request(backend.socket_path(),
+                                         "/r?" + cvknx::blackbox::with_session(query));
   }
   [[nodiscard]] FcgiResponse cache_only(const Backend& backend, int sub) const {
     return read(backend, "a=" + group_text(sub) + "&t=-1");
@@ -140,7 +142,8 @@ protected:
   }
   [[nodiscard]] FcgiResponse write(const Backend& backend, const std::string& group,
                                    const std::string& value) const {
-    return cvknx::blackbox::fcgi_request(backend.socket_path(), "/w?a=" + group + "&v=" + value);
+    return cvknx::blackbox::fcgi_request(
+        backend.socket_path(), "/w?" + cvknx::blackbox::with_session("a=" + group + "&v=" + value));
   }
 
   [[nodiscard]] bool has_bus_outage(const FcgiResponse& response) const {
@@ -249,7 +252,7 @@ TEST_F(IpTunnelBlackBox, KnxtoolTelegramReachesTheCacheOnlyRead) {
 TEST_F(IpTunnelBlackBox, KnxtoolTelegramWakesABlockedLongPoll) {
   const std::string socket = backend_->socket_path();
   auto pending = std::async(std::launch::async, [socket, this] {
-    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(4));
+    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(4) + "&s=0");
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   ASSERT_EQ(pending.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
@@ -293,9 +296,19 @@ TEST_F(IpTunnelBlackBox, SequentialWritesAreAllDelivered) {
     ASSERT_EQ(write(*backend_, group_text(8), "800" + std::to_string(value)).status, 200)
         << "write " << value << " failed";
   }
-  EXPECT_EQ(wait_for_cache(group_text(8)), "06")
-      << "the last of six writes must be the cached value\n"
-      << backend_->log();
+  // The writes are paced by the global rate limit (10 telegrams/s), so they
+  // reach the bus over roughly half a second.  Wait for the *last* value: the
+  // earlier ones are visible on the way there.
+  const auto deadline = Clock::now() + std::chrono::seconds(10);
+  std::string cached;
+  while (Clock::now() < deadline) {
+    cached = knxd_->groupcache_read(group_text(8));
+    if (cached == "06") {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  EXPECT_EQ(cached, "06") << "the last of six writes must be the cached value\n" << backend_->log();
 }
 
 TEST_F(IpTunnelBlackBox, WriteSourceAddressIsTheDeviceAssignedAddress) {
@@ -327,7 +340,7 @@ TEST_F(IpTunnelBlackBox, SecondBackendSeesTheFirstWrites) {
 
   const std::string socket = second_->socket_path();
   auto pending = std::async(std::launch::async, [socket, this] {
-    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(11));
+    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(11) + "&s=0");
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
@@ -354,7 +367,7 @@ TEST_F(IpTunnelBlackBox, OwnWriteIsNotEchoedToTheWriter) {
 
 TEST_F(IpTunnelBlackBox, MultiAddressWriteReachesEveryAddress) {
   const auto response = cvknx::blackbox::fcgi_request(
-      backend_->socket_path(), "/w?a=" + group_text(21) + "&a=" + group_text(22) + "&v=800c6f");
+      backend_->socket_path(), "/w?a=" + group_text(21) + "&a=" + group_text(22) + "&v=800c6f&s=0");
   ASSERT_EQ(response.status, 200) << response.body;
   // Each telegram is sent with its own sequence number; both must be ACKed
   // and reach the bus.
@@ -375,7 +388,7 @@ TEST_F(IpTunnelBlackBox, LongPollTimesOutWithAnEmptyAnswer) {
 TEST_F(IpTunnelBlackBox, BlockedLongPollDoesNotDelayAWrite) {
   const std::string socket = backend_->socket_path();
   auto pending = std::async(std::launch::async, [socket, this] {
-    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(13) + "&t=3");
+    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(13) + "&t=3&s=0");
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
@@ -426,7 +439,7 @@ TEST_F(IpTunnelBlackBox, InjectionAfterReconnectStillWakesTheLongPoll) {
 
   const std::string socket = backend_->socket_path();
   auto pending = std::async(std::launch::async, [socket, this] {
-    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(18));
+    return cvknx::blackbox::fcgi_request(socket, "/r?a=" + group_text(18) + "&s=0");
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   ASSERT_TRUE(knxd_->groupswrite(group_text(18), 6));

@@ -44,7 +44,7 @@ TEST_F(WriteHandlerTest, WriteSingleAddress) {
 
   // v must include the APCI byte (0x80 = A_GroupValue_Write).
   // This matches the reference eibwrite-cgi.c convention.
-  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=8042");
 
   EXPECT_EQ(result.http_status, 200);
 
@@ -64,7 +64,7 @@ TEST_F(WriteHandlerTest, WriteMultiByteValue) {
 
   // v must include the APCI byte (0x80 = A_GroupValue_Write).
   // This matches the reference eibwrite-cgi.c convention.
-  auto result = handler.handle("a=KNX:1/2/3&v=800c6f");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=800c6f");
 
   EXPECT_EQ(result.http_status, 200);
 
@@ -80,7 +80,7 @@ TEST_F(WriteHandlerTest, WriteMultiByteValue) {
 TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
   WriteHandler handler(knxd_, sessions_);
 
-  auto result = handler.handle("a=KNX:1/2/3&a=KNX:4/5/6&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&a=KNX:4/5/6&v=8042");
 
   EXPECT_EQ(result.http_status, 200);
 
@@ -95,7 +95,7 @@ TEST_F(WriteHandlerTest, WriteMultipleAddresses) {
 TEST_F(WriteHandlerTest, TooManyAddressesReturns400) {
   std::string q;
   for (size_t i = 0; i < QueryString::kMaxValuesPerKey + 10; ++i) {
-    q += (i == 0 ? "a=KNX:1/2/3" : "&a=KNX:1/2/3");
+    q += (i == 0 ? "s=0&a=KNX:1/2/3" : "&a=KNX:1/2/3");
   }
   q += "&v=8042";
 
@@ -109,15 +109,25 @@ TEST_F(WriteHandlerTest, TooManyAddressesReturns400) {
 
 TEST_F(WriteHandlerTest, MissingAddress) {
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("v=8042");
+  auto result = handler.handle("s=0&v=8042");
   // Missing address: nothing to write, returns 200 (no-op)
   EXPECT_EQ(result.http_status, 200);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
+// The protocol requires `s` on every request: a write from a client that never
+// logged in must not toggle the bus.
+TEST_F(WriteHandlerTest, MissingSessionReturns401) {
+  WriteHandler handler(knxd_, sessions_);
+  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  EXPECT_EQ(result.http_status, 401);
+  EXPECT_NE(result.body.find("\"error\":\"missing session\""), std::string::npos);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
 TEST_F(WriteHandlerTest, MissingValue) {
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("a=KNX:1/2/3");
+  auto result = handler.handle("s=0&a=KNX:1/2/3");
   // Missing value: nothing to write, returns 200 (no-op)
   EXPECT_EQ(result.http_status, 200);
   EXPECT_TRUE(knxd_.sent_packets().empty());
@@ -125,7 +135,7 @@ TEST_F(WriteHandlerTest, MissingValue) {
 
 TEST_F(WriteHandlerTest, InvalidHexValue) {
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("a=KNX:1/2/3&v=ZZ");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=ZZ");
   // Invalid hex is a client error — answering 200 would pretend success.
   EXPECT_EQ(result.http_status, 400);
   EXPECT_NE(result.body.find("\"error\":\"invalid value\""), std::string::npos);
@@ -134,7 +144,7 @@ TEST_F(WriteHandlerTest, InvalidHexValue) {
 
 TEST_F(WriteHandlerTest, InvalidAddress) {
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("a=invalid&v=8042");
+  auto result = handler.handle("s=0&a=invalid&v=8042");
   EXPECT_EQ(result.http_status, 404);
   EXPECT_NE(result.body.find("\"error\":\"invalid address format\""), std::string::npos);
   EXPECT_TRUE(knxd_.sent_packets().empty());
@@ -147,12 +157,12 @@ TEST_F(WriteHandlerTest, WriteValueWithoutApciIsRejected) {
   WriteHandler handler(knxd_, sessions_);
 
   // v=0c6f — first byte 0x0C does not have bit 7 set
-  auto result = handler.handle("a=KNX:1/2/3&v=0c6f");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=0c6f");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 
   // v=42 — single byte 0x42 does not have bit 7 set
-  result = handler.handle("a=KNX:1/2/3&v=42");
+  result = handler.handle("s=0&a=KNX:1/2/3&v=42");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
@@ -163,12 +173,12 @@ TEST_F(WriteHandlerTest, WriteValueWithReadApciIsRejected) {
   WriteHandler handler(knxd_, sessions_);
 
   // v=000c6f — first byte 0x00 = Read APCI, not Write
-  auto result = handler.handle("a=KNX:1/2/3&v=000c6f");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=000c6f");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 
   // v=400c6f — first byte 0x40 = Response APCI, not Write
-  result = handler.handle("a=KNX:1/2/3&v=400c6f");
+  result = handler.handle("s=0&a=KNX:1/2/3&v=400c6f");
   EXPECT_EQ(result.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
@@ -178,7 +188,7 @@ TEST_F(WriteHandlerTest, WriteDoesNotNeedLocalCache) {
   // knxd's built-in cache handles storage.
   WriteHandler handler(knxd_, sessions_);
 
-  auto result = handler.handle("a=KNX:1/2/3&v=800c6f");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=800c6f");
   EXPECT_EQ(result.http_status, 200);
 
   auto sent = knxd_.sent_packets();
@@ -189,7 +199,7 @@ TEST_F(WriteHandlerTest, WriteDoesNotNeedLocalCache) {
 TEST_F(WriteHandlerTest, DefaultNamespace) {
   WriteHandler handler(knxd_, sessions_);
 
-  auto result = handler.handle("a=1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=1/2/3&v=8042");
 
   EXPECT_EQ(result.http_status, 200);
   auto sent = knxd_.sent_packets();
@@ -227,7 +237,7 @@ TEST_F(WriteHandlerTest, SendFailureReturns503) {
   knxd_.set_send_fail_count(1);
 
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=8042");
   EXPECT_EQ(result.http_status, 503);
   EXPECT_NE(result.body.find("\"error\":\"write failed\""), std::string::npos);
   EXPECT_TRUE(knxd_.sent_packets().empty());
@@ -237,7 +247,7 @@ TEST_F(WriteHandlerTest, PartialFailureReturns503) {
   knxd_.set_send_fail_count(1);
 
   WriteHandler handler(knxd_, sessions_);
-  auto result = handler.handle("a=KNX:1/2/3&a=KNX:4/5/6&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&a=KNX:4/5/6&v=8042");
   EXPECT_EQ(result.http_status, 503);
   // A partially applied multi-address write must say so instead of claiming a
   // plain failure (or, worse, success).
@@ -254,14 +264,14 @@ TEST_F(WriteHandlerTest, SendFailureClearedOnSubsequentCalls) {
   WriteHandler handler(knxd_, sessions_);
 
   // First call fails
-  auto result1 = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result1 = handler.handle("s=0&a=KNX:1/2/3&v=8042");
   EXPECT_EQ(result1.http_status, 503);
   EXPECT_NE(result1.body.find("\"error\":\"write failed\""), std::string::npos);
 
   // Reset the mock and try again — should succeed
   knxd_.set_send_fail_count(0);
 
-  auto result2 = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result2 = handler.handle("s=0&a=KNX:1/2/3&v=8042");
   EXPECT_EQ(result2.http_status, 200);
   EXPECT_FALSE(knxd_.sent_packets().empty());
 }
@@ -277,7 +287,7 @@ TEST_F(WriteHandlerTest, FailedWriteReportsTheKnxdOutage) {
   knxd_.set_send_fail_count(1);
 
   WriteHandler handler(knxd_, sessions_, &cache_);
-  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=8042");
 
   EXPECT_EQ(result.http_status, 503);
   EXPECT_NE(result.body.find("\"error\":\"write failed\""), std::string::npos) << result.body;
@@ -291,7 +301,7 @@ TEST_F(WriteHandlerTest, FailedWriteWithoutCacheStillReportsUnavailability) {
   knxd_.set_send_fail_count(1);
 
   WriteHandler handler(knxd_, sessions_);  // no cache attached
-  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=8042");
 
   EXPECT_EQ(result.http_status, 503);
   EXPECT_NE(result.body.find("\"knxd\":{\"ok\":false}"), std::string::npos) << result.body;
@@ -301,7 +311,7 @@ TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
   cache_.publish_bus_status(true, 1000);
 
   WriteHandler handler(knxd_, sessions_, &cache_);
-  auto result = handler.handle("a=KNX:1/2/3&v=8042");
+  auto result = handler.handle("s=0&a=KNX:1/2/3&v=8042");
 
   EXPECT_EQ(result.http_status, 200);
   EXPECT_EQ(result.body.find("\"knxd\""), std::string::npos) << result.body;
@@ -314,22 +324,40 @@ TEST_F(WriteHandlerTest, SuccessfulWriteHasNoKnxdBlock) {
 TEST_F(WriteHandlerTest, EmptyValueIsRejected) {
   // An empty `v` is not a value: it is a client error, not a silent success.
   WriteHandler handler(knxd_, sessions_);
-  auto r = handler.handle("a=1/2/3&v=");
+  auto r = handler.handle("s=0&a=1/2/3&v=");
   EXPECT_EQ(r.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, ValueWithoutApciIsRejected) {
   WriteHandler handler(knxd_, sessions_);
-  auto r = handler.handle("a=1/2/3&v=42");
+  auto r = handler.handle("s=0&a=1/2/3&v=42");
   EXPECT_EQ(r.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }
 
 TEST_F(WriteHandlerTest, OverlongValueIsRejected) {
   WriteHandler handler(knxd_, sessions_);
-  // 15 data bytes + APCI byte + the prepended 0x00 exceeds the ring limit.
-  auto r = handler.handle("a=1/2/3&v=80000102030405060708090a0b0c0d0e0f");
+  // 15 data bytes + APCI byte + the prepended 0x00 exceeds the frame limit.
+  auto r = handler.handle("s=0&a=1/2/3&v=80000102030405060708090a0b0c0d0e0f");
+  EXPECT_EQ(r.http_status, 400);
+  EXPECT_TRUE(knxd_.sent_packets().empty());
+}
+
+// 13 bytes of `v` (12 data octets) is the largest value a standard cEMI frame
+// can carry: the handler and the TX ring must agree on that boundary, otherwise
+// a knxd deployment accepts a value that every ip-* deployment answers 503.
+TEST_F(WriteHandlerTest, ValueAtTheFrameLimitIsAccepted) {
+  WriteHandler handler(knxd_, sessions_);
+  auto r = handler.handle("s=0&a=1/2/3&v=800102030405060708090a0b0c");  // 13 bytes
+  EXPECT_EQ(r.http_status, 200);
+  ASSERT_EQ(knxd_.sent_packets().size(), 1U);
+  EXPECT_EQ(knxd_.sent_packets()[0].apdu.size(), 14U);
+}
+
+TEST_F(WriteHandlerTest, ValueAboveTheFrameLimitIsRejected) {
+  WriteHandler handler(knxd_, sessions_);
+  auto r = handler.handle("s=0&a=1/2/3&v=800102030405060708090a0b0c0d");  // 14 bytes
   EXPECT_EQ(r.http_status, 400);
   EXPECT_TRUE(knxd_.sent_packets().empty());
 }

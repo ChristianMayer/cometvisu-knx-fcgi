@@ -363,4 +363,41 @@ TEST_F(DebugLogTest, EveryLevelWritesALevelPrefixedLine) {
   EXPECT_NE(output.find("an error line"), std::string::npos) << output;
 }
 
+// The login sends the credentials in the query string; they must never reach a
+// log file, even with DEBUG_BACKEND enabled.
+TEST_F(DebugLogTest, CredentialsAreRedactedFromTheLoggedUri) {
+  DebugLog::set_enabled(true);
+  StderrCapture capture;
+  DebugLog::http_request("POST", "/l?u=admin&p=secret");
+
+  const std::string output = capture.str();
+  EXPECT_EQ(output.find("secret"), std::string::npos) << output;
+  EXPECT_EQ(output.find("admin"), std::string::npos) << output;
+  EXPECT_NE(output.find("u=***"), std::string::npos) << output;
+  EXPECT_NE(output.find("p=***"), std::string::npos) << output;
+}
+
+// A CR/LF in the request line would let a client forge log lines and hide what
+// it did; control characters are replaced before they are written.
+TEST_F(DebugLogTest, ControlCharactersCannotForgeLogLines) {
+  DebugLog::set_enabled(true);
+  StderrCapture capture;
+  DebugLog::http_request("GET", "/r?a=1/2/3\n[ERROR] forged");
+
+  const std::string output = capture.str();
+  EXPECT_EQ(output.find("\n[ERROR] forged"), std::string::npos) << output;
+  EXPECT_NE(output.find("?[ERROR] forged"), std::string::npos) << output;
+}
+
+/// Only a complete `u=`/`p=` parameter is a credential; a key that merely
+/// starts with those letters must survive, and DEL is a control character too.
+TEST_F(DebugLogTest, RedactionOnlyMatchesCompleteCredentialParameters) {
+  DebugLog::set_enabled(true);
+  StderrCapture capture;
+  DebugLog::http_request("GET", "/l?a=1&u&p&possible=1&x=\x7f&z=2&u");
+
+  const std::string output = capture.str();
+  EXPECT_NE(output.find("/l?a=1&u&p&possible=1&x=?&z=2&u"), std::string::npos) << output;
+}
+
 }  // namespace cvknx

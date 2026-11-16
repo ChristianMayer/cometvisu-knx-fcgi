@@ -31,8 +31,10 @@ constexpr std::size_t kControlBlockSize = 7;
 std::vector<std::uint8_t> encode_group_frame(std::uint8_t message_code, std::uint16_t source,
                                              std::uint16_t destination,
                                              std::span<const std::uint8_t> apdu) {
-  if (apdu.empty()) {
-    // The length octet is (APDU octets - 1) and would underflow.
+  // The length octet is (APDU octets - 1) and fits one byte.  A longer APDU
+  // cannot be encoded: reject it instead of writing a truncated length that
+  // would describe a different frame.
+  if (apdu.empty() || apdu.size() > 256) {
     return {};
   }
 

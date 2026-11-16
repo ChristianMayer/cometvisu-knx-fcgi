@@ -193,6 +193,10 @@ struct FcgiResponse {
 /// Position ("i") from a /r response, 0 when absent.
 [[nodiscard]] std::uint32_t response_position(const FcgiResponse& response);
 
+/// Append the protocol-mandated session parameter (`s=0`, the anonymous
+/// session) unless @p query already carries an `s=` — a test that asserts the
+/// behaviour of an invalid session keeps its own value.
+[[nodiscard]] std::string with_session(const std::string& query);
 /// The "d" object as raw text ("" when absent).
 [[nodiscard]] std::string response_data_object(const FcgiResponse& response);
 

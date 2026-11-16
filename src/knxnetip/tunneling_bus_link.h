@@ -112,6 +112,11 @@ private:
   bool rx_has_expected_ = false;
   std::uint8_t ack_wait_sequence_ = 0;
   bool ack_received_ = false;
+  /// TUNNELLING_ACK status received for ack_wait_sequence_ (0x00 = accepted).
+  std::uint8_t ack_status_ = 0;
+  /// The device answered "busy, do not repeat": the telegram is dropped
+  /// instead of being retransmitted or reported as sent.
+  bool ack_rejected_ = false;
 
   /// A CONNECTIONSTATE_REQUEST is outstanding.  A device that never answers it
   /// is gone: without this the tunnel would look healthy forever while the bus

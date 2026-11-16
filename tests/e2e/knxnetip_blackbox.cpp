@@ -583,6 +583,15 @@ FcgiResponse fcgi_request(const std::string& socket_path, const std::string& tar
   return response;
 }
 
+std::string with_session(const std::string& query) {
+  // The protocol requires `s` on every /r and /w.  A test that wants an
+  // invalid session supplies its own value and keeps it.
+  if (query.find("s=") != std::string::npos) {
+    return query;
+  }
+  return query.empty() ? "s=0" : query + "&s=0";
+}
+
 std::uint32_t response_position(const FcgiResponse& response) {
   const std::size_t pos = response.body.find("\"i\":");
   if (pos == std::string::npos) {

@@ -113,7 +113,17 @@ TEST(RoutingEdgeCase, ConnectFailsWhenThePortIsAlreadyInUse) {
 TEST(RoutingEdgeCase, ConnectFailsOnUnknownInterfaceForMulticast) {
   RoutingOptions options;
   options.address = "224.0.23.12";
-  options.iface = "definitely-not-an-interface0";
+  options.iface = "nope0";  // short enough, but the kernel does not know it
+  RoutingBusLink link(options);
+  EXPECT_FALSE(link.connect());
+}
+
+/// An interface name longer than IFNAMSIZ cannot be represented.  It must be a
+/// startup error, never a silent truncation that joins on another interface.
+TEST(RoutingEdgeCase, ConnectRejectsAnInterfaceNameThatCannotBeRepresented) {
+  RoutingOptions options;
+  options.address = "224.0.23.12";
+  options.iface = std::string(64, 'x');
   RoutingBusLink link(options);
   EXPECT_FALSE(link.connect());
 }

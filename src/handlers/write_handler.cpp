@@ -46,8 +46,11 @@ namespace cvknx {
 
 namespace {
 
-/// Largest APDU the shared TX ring accepts (2 header octets + data).
-constexpr std::size_t kMaxWriteApduBytes = 15;
+/// Largest APDU a write may produce.  A standard cEMI frame carries at most
+/// 14 APDU octets (TPCI/APCI + data) and the shared TX ring is sized for
+/// exactly that; anything longer would be rejected by the ring *after* the
+/// handler accepted it (a 503 for a value the protocol cannot carry).
+constexpr std::size_t kMaxWriteApduBytes = 14;
 
 /// Build the APDU for a write from the `v` parameter.
 /// @return the APDU, or std::nullopt when the value is not a valid
@@ -87,6 +90,22 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
     return result;
   }
 
+  // ---- Session: the protocol requires `s` on every request ----
+  // A request without a session id is not a write: answer 401 instead of
+  // toggling the bus for a client that never logged in.  The anonymous
+  // session "0" (returned by /l when no credentials are sent) is valid.
+  const auto session = params.get("s");
+  if (!session) {
+    result.http_status = 401;
+    result.body = R"({"error":"missing session"})";
+    return result;
+  }
+  if (!sessions_.is_valid(*session)) {
+    result.http_status = 401;
+    result.body = R"({"error":"invalid session"})";
+    return result;
+  }
+
   // ---- Parameter extraction ----
   const auto addresses = params.get_all("a");
   const auto value_opt = params.get("v");
@@ -95,15 +114,6 @@ WriteResult WriteHandler::handle(std::string_view query_string) {
   // reference implementation answers 200 as well).
   if (addresses.empty() || !value_opt) {
     return result;
-  }
-
-  // ---- Session validation ----
-  if (auto s_opt = params.get("s")) {
-    if (!sessions_.is_valid(*s_opt)) {
-      result.http_status = 401;
-      result.body = R"({"error":"invalid session"})";
-      return result;
-    }
   }
 
   // A value that is not a valid A_GroupValue_Write is a client error.  It used
