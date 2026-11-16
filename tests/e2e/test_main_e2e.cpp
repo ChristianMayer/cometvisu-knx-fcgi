@@ -963,10 +963,13 @@ TEST(MainE2ETest, OldestSessionIsEvictedWhenTheStoreIsFull) {
   const std::string third = LoginSession(path);
   ASSERT_FALSE(third.empty());
 
-  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + third).find("Status: 200"), std::string::npos);
-  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + second).find("Status: 200"), std::string::npos);
-  EXPECT_NE(FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + first).find("Status: 401"), std::string::npos)
-      << "the oldest session should have been evicted";
+  const std::string third_response = FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + third);
+  EXPECT_NE(third_response.find("Status: 200"), std::string::npos) << third_response;
+  const std::string second_response = FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + second);
+  EXPECT_NE(second_response.find("Status: 200"), std::string::npos) << second_response;
+  const std::string first_response = FcgiGet(path, "/r?a=1/2/3&t=-1&s=" + first);
+  EXPECT_NE(first_response.find("Status: 401"), std::string::npos)
+      << "the oldest session should have been evicted, got: " << first_response;
 
   EXPECT_EQ(process.terminate(), 0);
   ::unlink(path.c_str());
