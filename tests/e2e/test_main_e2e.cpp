@@ -31,12 +31,15 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <regex>
@@ -56,6 +59,108 @@ std::string TempSocketPath(const char* tag) {
   return "/tmp/cvknx-main-" + std::string{tag} + "-" + std::to_string(::getpid()) + "-" +
          std::to_string(counter++) + ".sock";
 }
+
+/// Read exactly @p size bytes, or fail on EOF/error.
+bool ReadExactly(int fd, std::uint8_t* data, std::size_t size) {
+  std::size_t total = 0;
+  while (total < size) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    const ssize_t got = ::read(fd, data + total, size - total);
+    if (got <= 0) {
+      return false;
+    }
+    total += static_cast<std::size_t>(got);
+  }
+  return true;
+}
+
+/// A stand-in for knxd that answers the eibd group-socket handshake.
+///
+/// The startup probe only reports a bus link as usable when connect() succeeded,
+/// and for the knxd transport that means "socket plus answered EIB_OPEN_GROUPCON".
+/// A real daemon is not available in every environment (the coverage job runs
+/// without knxd), so this helper makes the "reachable bus" path of main()
+/// testable anywhere.
+class FakeKnxd {
+public:
+  explicit FakeKnxd(const std::string& path) : path_(path) {
+    ::unlink(path_.c_str());
+    listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd_ < 0) {
+      return;
+    }
+    struct sockaddr_un address {};
+    address.sun_family = AF_UNIX;
+    std::snprintf(address.sun_path, sizeof(address.sun_path), "%s", path_.c_str());
+    if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::listen(listen_fd_, 8) != 0) {
+      ::close(listen_fd_);
+      listen_fd_ = -1;
+      return;
+    }
+    thread_ = std::thread([this] { Serve(); });
+  }
+
+  ~FakeKnxd() {
+    stop_.store(true);
+    if (listen_fd_ >= 0) {
+      // Wakes the accept() the worker thread is blocked in.
+      ::shutdown(listen_fd_, SHUT_RDWR);
+      ::close(listen_fd_);
+    }
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    ::unlink(path_.c_str());
+  }
+
+  FakeKnxd(const FakeKnxd&) = delete;
+  FakeKnxd& operator=(const FakeKnxd&) = delete;
+  FakeKnxd(FakeKnxd&&) = delete;
+  FakeKnxd& operator=(FakeKnxd&&) = delete;
+
+  [[nodiscard]] bool listening() const { return listen_fd_ >= 0; }
+  [[nodiscard]] const std::string& path() const { return path_; }
+
+private:
+  /// Accept connections and answer every EIB_OPEN_GROUPCON with a success
+  /// reply (`[len=2][type=0x0026]`).  Other messages are ignored: the backend
+  /// sends nothing else before it is told that the group socket is open.
+  void Serve() {
+    while (!stop_.load()) {
+      const int fd = ::accept(listen_fd_, nullptr, nullptr);
+      if (fd < 0) {
+        return;  // listening socket closed
+      }
+      struct timeval timeout {
+        1, 0
+      };
+      (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+      std::uint8_t header[2] = {};
+      while (!stop_.load() && ReadExactly(fd, header, sizeof(header))) {
+        const auto payload_len = static_cast<std::size_t>((header[0] << 8) | header[1]);
+        std::vector<std::uint8_t> payload(payload_len);
+        if (!ReadExactly(fd, payload.data(), payload.size())) {
+          break;
+        }
+        const bool is_open_groupcon =
+            payload.size() >= 2 && payload[0] == 0x00 && payload[1] == 0x26;
+        if (is_open_groupcon) {
+          const std::uint8_t reply[] = {0x00, 0x02, 0x00, 0x26};
+          if (::write(fd, reply, sizeof(reply)) != static_cast<ssize_t>(sizeof(reply))) {
+            break;  // the backend closed the connection: wait for the next one
+          }
+        }
+      }
+      ::close(fd);
+    }
+  }
+
+  std::string path_;
+  int listen_fd_ = -1;
+  std::atomic<bool> stop_{false};
+  std::thread thread_;
+};
 
 /// A child process running the backend binary.
 class BackendProcess {
@@ -385,6 +490,24 @@ TEST(MainE2ETest, MissingFcgiSocketIsRejected) {
   EXPECT_EQ(process.wait_exit(), 1);
   EXPECT_NE(process.output().find("FCGI_SOCKET is required"), std::string::npos)
       << process.output();
+}
+
+/// A transport with connection state is only reported as usable when the
+/// handshake succeeded — and then without the "stateless" note that the
+/// routing transport gets.  A real knxd socket therefore has to exist: the
+/// environment supplies one, a daemon is replaced by the fake.
+TEST(MainE2ETest, ReachableKnxdIsReportedAsUsable) {
+  FakeKnxd daemon{TempSocketPath("fake-knxd")};
+  ASSERT_TRUE(daemon.listening());
+
+  BackendProcess process({}, {{"KNX_TRANSPORT", "knxd"},
+                              {"KNXD_SOCKET", daemon.path()},
+                              {"FCGI_SOCKET", TempSocketPath("knxd-probe")}});
+  ASSERT_TRUE(process.wait_for_output("Bus link usable")) << process.output();
+  EXPECT_NE(process.output().find("knxd at " + daemon.path()), std::string::npos)
+      << process.output();
+  EXPECT_EQ(process.output().find("stateless"), std::string::npos)
+      << "the knxd transport has connection state, so the probe proves the bus works";
 }
 
 TEST(MainE2ETest, InvalidNumericSettingsFallBackToSafeValues) {

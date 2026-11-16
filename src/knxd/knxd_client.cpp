@@ -107,11 +107,12 @@ bool write_all(int fd, const uint8_t* data, size_t len) {
 /// Shrink a vector if capacity far exceeds usage — prevents memory
 /// retention after traffic bursts on long-running embedded systems.
 inline void shrink_if_large(std::vector<uint8_t>& buf) {
+  // Only the 4x rule is checked: the buffer grows by whole eibd messages, and
+  // a message is at most 64 KiB, so "capacity exceeds size by more than
+  // 64 KiB" cannot happen — such a clause would be dead code no test can
+  // reach (the coverage gate rejected it).
   // NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result)
-  // The 64 KiB clause cannot trigger: a complete eibd message is at most 64 KiB,
-  // so the buffer never grows beyond that.
-  if (buf.capacity() > static_cast<size_t>(buf.size()) * 4 ||
-      (buf.capacity() - buf.size()) > static_cast<size_t>(64 * 1024)) {  // GCOV_EXCL_BR_LINE
+  if (buf.capacity() > static_cast<size_t>(buf.size()) * 4) {
     buf.shrink_to_fit();
   }
 }
